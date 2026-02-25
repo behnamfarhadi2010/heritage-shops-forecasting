@@ -1,0 +1,241 @@
+
+================================================================================
+HOW TO UPDATE YOUR STREAMLIT APP
+================================================================================
+
+You've added the file upload feature! Here's how to update your live app:
+
+METHOD 1: Command Line (Fastest)
+────────────────────────────────────────────────────────────────────────────────
+
+1. Save the new app.py file to your project folder
+
+2. Open terminal/command prompt in your project folder
+
+3. Run these commands:
+
+   git add app.py
+   git commit -m "Added file upload feature for sales and inventory data"
+   git push
+
+4. Wait 60-90 seconds
+
+5. Your app automatically updates! ✅
+
+That's it! Streamlit Cloud detects the push and redeploys automatically.
+
+
+METHOD 2: GitHub Website (No Command Line)
+────────────────────────────────────────────────────────────────────────────────
+
+1. Go to your GitHub repository
+   https://github.com/YOUR_USERNAME/heritage-shops-forecasting
+
+2. Click on "app.py"
+
+3. Click the pencil icon (✏️ Edit)
+
+4. Delete the old content
+
+5. Copy and paste the new app.py content
+
+6. Scroll down, add commit message:
+   "Added file upload feature"
+
+7. Click "Commit changes"
+
+8. Wait 60-90 seconds
+
+9. Your app updates automatically! ✅
+
+
+METHOD 3: GitHub Desktop (Easiest)
+────────────────────────────────────────────────────────────────────────────────
+
+1. Open GitHub Desktop
+
+2. Select your repository
+
+3. You'll see "app.py" has changed
+
+4. Add commit message:
+   "Added file upload feature"
+
+5. Click "Commit to main"
+
+6. Click "Push origin"
+
+7. Wait 60-90 seconds
+
+8. Done! ✅
+
+
+================================================================================
+VERIFY THE UPDATE
+================================================================================
+
+1. Go to your app URL:
+   https://heritage-shops-forecasting.streamlit.app
+
+2. You should see a new menu option: "📤 Upload Data"
+
+3. If you see the old version:
+   • Clear browser cache (Ctrl+F5 or Cmd+Shift+R)
+   • Wait another minute
+   • Check Streamlit Cloud dashboard for deployment status
+
+
+================================================================================
+WHAT CHANGED
+================================================================================
+
+NEW PAGE: 📤 Upload Data
+  • Upload historical sales CSV/Excel
+  • Upload current inventory CSV/Excel  
+  • Automatic column detection
+  • Real-time forecast generation
+  • Progress tracking
+  • Download results
+
+ENHANCED FEATURES:
+  • Flexible column name matching
+  • Multiple date format support
+  • Automatic monthly aggregation
+  • Priority alerts based on current date
+  • Days until stockout calculation
+  • Reorder point calculation
+
+
+================================================================================
+TESTING THE NEW FEATURE
+================================================================================
+
+STEP 1: Prepare Test Data
+────────────────────────────────────────────────────────────────────────────────
+
+Create a simple CSV with your sales history:
+
+Sales History Example (sales_test.csv):
+Item_Number,Date,Quantity
+104468,2024-01,245
+104468,2024-02,198
+104468,2024-03,287
+104468,2024-04,312
+104414,2024-01,156
+104414,2024-02,142
+104414,2024-03,178
+
+Current Inventory Example (inventory_test.csv):
+Item_Number,Current_Stock
+104468,45
+104414,23
+
+
+STEP 2: Upload and Test
+────────────────────────────────────────────────────────────────────────────────
+
+1. Go to your app
+2. Click "📤 Upload Data"
+3. Upload sales_test.csv
+4. Upload inventory_test.csv
+5. Set forecast period (e.g., 3 months)
+6. Click "🚀 Generate Forecasts"
+7. Wait for results
+8. Check alerts and recommendations
+
+
+STEP 3: Download Results
+────────────────────────────────────────────────────────────────────────────────
+
+1. Review the forecasts table
+2. Click "📥 Download Full Forecasts CSV"
+3. Open in Excel to verify
+4. Check priority alerts (🚨 URGENT, ⚠️ Warning, etc.)
+
+
+================================================================================
+NEXT STEPS AFTER UPDATE
+================================================================================
+
+1. ✅ Update your app on Streamlit Cloud (use method above)
+
+2. 📊 Export real sales data from your POS:
+   • Monthly sales by item (last 12-24 months)
+   • Current inventory levels
+   • Save as CSV files
+
+3. 🧪 Test with real data:
+   • Upload your actual sales history
+   • Upload current inventory
+   • Generate forecasts
+   • Verify results make sense
+
+4. 📱 Share with team:
+   • Send them the app URL
+   • Show them the Upload Data page
+   • Train them on interpreting alerts
+   • Set up monthly update schedule
+
+5. 🔄 Establish workflow:
+   • Monthly: Export new sales data
+   • Upload to system
+   • Review urgent alerts
+   • Generate purchase orders
+   • Place orders with suppliers
+
+
+================================================================================
+TROUBLESHOOTING
+================================================================================
+
+Problem: App shows old version after push
+Solution: 
+  • Check Streamlit Cloud logs (Manage app → Logs)
+  • Clear browser cache (Ctrl+F5)
+  • Check git push was successful: git log
+
+Problem: Upload page not showing
+Solution:
+  • Verify app.py was updated on GitHub
+  • Check for Python syntax errors in logs
+  • Restart app from Streamlit Cloud dashboard
+
+Problem: File upload fails
+Solution:
+  • Check file size (under 200MB)
+  • Verify CSV format (not corrupted)
+  • Check column names match guide
+  • Try with smaller test file first
+
+Problem: "Could not identify columns"
+Solution:
+  • Check FILE_FORMAT_GUIDE.txt
+  • Rename columns to match expected names
+  • Ensure CSV has Item, Date, Quantity columns
+
+
+================================================================================
+QUICK COMMAND REFERENCE
+================================================================================
+
+Update app:
+  git add app.py
+  git commit -m "Your message"
+  git push
+
+Check status:
+  git status
+
+View recent commits:
+  git log --oneline -5
+
+Undo changes (before commit):
+  git checkout app.py
+
+Create backup branch:
+  git branch backup-before-upload
+  git checkout -b backup-before-upload
+  git checkout main
+
+
+================================================================================
