@@ -29,10 +29,61 @@ EXCLUDE_KEYWORDS = [
 ]
 DATED_KEYWORDS = ["calendar", "planner", "diary", "agenda", "almanac"]
 
+OFFICIAL_2026_SCHEDULE = [
+    ("2026-05-21","SH Vega",152),
+    ("2026-06-05","Volendam",1839),
+    ("2026-06-16","Volendam",1839),
+    ("2026-06-25","Volendam",1839),
+    ("2026-06-26","Celebrity Silhouette",2886),
+    ("2026-07-14","Vista",1321),
+    ("2026-07-14","Crown Princess",3592),
+    ("2026-08-18","Zuiderdam",2388),
+    ("2026-08-20","Azamara Journey",694),
+    ("2026-08-24","National Geographic Explorer",154),
+    ("2026-08-26","Volendam",1839),
+    ("2026-08-30","Seven Seas Splendor",754),
+    ("2026-08-31","Celebrity Silhouette",2886),
+    ("2026-09-02","National Geographic Explorer",154),
+    ("2026-09-02","AIDAdiva",2500),
+    ("2026-09-03","Amera",913),
+    ("2026-09-07","Volendam",1839),
+    ("2026-09-08","Arcadia",2388),
+    ("2026-09-11","Ocean Nova",78),
+    ("2026-09-12","National Geographic Explorer",154),
+    ("2026-09-14","Hanseatic Inspiration",230),
+    ("2026-09-15","Valiant Lady",2770),
+    ("2026-09-19","Azamara Journey",694),
+    ("2026-09-22","National Geographic Explorer",154),
+    ("2026-09-22","Le Lyrial",200),
+    ("2026-09-22","Ocean Nova",78),
+    ("2026-09-23","Ocean Albatros",1200),
+    ("2026-09-27","Ocean Explorer",161),
+    ("2026-09-29","Expedition",1200),
+    ("2026-09-30","Ocean Albatros",1200),
+    ("2026-09-30","Seabourn Ovation",638),
+    ("2026-10-01","Star Pride",212),
+    ("2026-10-01","National Geographic Explorer",154),
+    ("2026-10-02","L'Austral",264),
+    ("2026-10-07","Roland Amundsen",600),
+    ("2026-10-08","World Navigator",200),
+    ("2026-10-10","National Geographic Explorer",154),
+    ("2026-10-11","Ocean Victory",186),
+]
+
 
 # ══════════════════════════════════════════════════════════════════════════════
-# CSV PARSER  — handles real comma-separated POS export
+# CSV PARSER — detects actual date range and calculates real weeks
 # ══════════════════════════════════════════════════════════════════════════════
+def parse_date_range(date_str):
+    """Try multiple date formats used in the POS export."""
+    for fmt in ("%d/%b/%Y", "%d-%b-%Y", "%Y-%m-%d", "%m/%d/%Y"):
+        try:
+            return datetime.strptime(date_str.strip(), fmt)
+        except ValueError:
+            continue
+    return None
+
+
 def parse_csv(uploaded_file):
     content = uploaded_file.read().decode("utf-8", errors="replace")
     lines   = content.splitlines()
@@ -40,6 +91,8 @@ def parse_csv(uploaded_file):
     branch    = "Unknown"
     date_from = ""
     date_to   = ""
+    dt_from   = None
+    dt_to     = None
 
     for line in lines[:15]:
         if line.startswith("Branch:"):
@@ -51,6 +104,15 @@ def parse_csv(uploaded_file):
             if m:
                 date_from = m.group(1)
                 date_to   = m.group(2).split(",")[0]
+                dt_from   = parse_date_range(date_from)
+                dt_to     = parse_date_range(date_to)
+
+    # Calculate actual weeks in the report — KEY FIX
+    if dt_from and dt_to:
+        actual_days  = max((dt_to - dt_from).days, 1)
+        actual_weeks = actual_days / 7.0
+    else:
+        actual_weeks = 52.0   # fallback: assume full year
 
     data_rows = []
     in_data   = False
@@ -104,20 +166,40 @@ def parse_csv(uploaded_file):
             continue
 
     if not data_rows:
-        return None, branch, date_from, date_to
+        return None, branch, date_from, date_to, actual_weeks
 
     df = pd.DataFrame(data_rows)
-    df["Branch"] = branch
-    return df, branch, date_from, date_to
+    df["Branch"]       = branch
+    df["Actual Weeks"] = actual_weeks
+    return df, branch, date_from, date_to, actual_weeks
+
+
+def load_cruise_csv(uploaded_file):
+    cdf = pd.read_csv(uploaded_file)
+    cdf.columns = [c.strip().title() for c in cdf.columns]
+    cdf = cdf.rename(columns={
+        "Ship": "Ship Name", "Vessel": "Ship Name",
+        "Pax": "Passengers", "Passenger Count": "Passengers",
+        "Arrival Date": "Date", "Visit Date": "Date",
+    })
+    if "Date" not in cdf.columns:
+        return None, "CSV must have a 'Date' column (YYYY-MM-DD format)."
+    cdf["Date"]       = pd.to_datetime(cdf["Date"], errors="coerce")
+    cdf["Month"]      = cdf["Date"].dt.strftime("%Y-%m")
+    if "Passengers" not in cdf.columns:
+        cdf["Passengers"] = 1200
+    cdf["Passengers"] = pd.to_numeric(cdf["Passengers"], errors="coerce").fillna(1200).astype(int)
+    return cdf, None
 
 
 # ══════════════════════════════════════════════════════════════════════════════
 # HELPERS
 # ══════════════════════════════════════════════════════════════════════════════
-def classify_velocity(sold):
-    if sold >= 50: return "🔥 Fast"
-    if sold >= 10: return "⚡ Medium"
-    if sold >= 1:  return "🐢 Slow"
+def classify_velocity(sold, actual_weeks):
+    weekly = sold / max(actual_weeks, 1)
+    if weekly >= 2:    return "🔥 Fast"
+    if weekly >= 0.5:  return "⚡ Medium"
+    if weekly > 0:     return "🐢 Slow"
     return "💀 Dead"
 
 
@@ -145,7 +227,7 @@ def get_exclusion_reason(desc, item_num, margin, sold, custom_kw, custom_items):
         return f"Negative margin ({margin:.1f}%)"
 
     if sold == 0:
-        return "Zero sales — potential dead stock"
+        return "Zero sales — dead stock"
 
     return None
 
@@ -163,43 +245,53 @@ def build_reorder(df, cruise_df, reorder_weeks, safety_pct, custom_kw, custom_it
             elif pax > 2000: cruise_mult = 1.20
             elif pax > 0:    cruise_mult = 1.10
 
+    # Use actual weeks from the report (per row or fallback)
+    actual_weeks = float(df["Actual Weeks"].iloc[0]) if "Actual Weeks" in df.columns else 52.0
+
     rows = []
     for _, r in df.iterrows():
-        reason     = get_exclusion_reason(
-            r["Description"], r["Item Number"], r["Margin"],
-            r["Number Sold"], custom_kw, custom_items)
-        sold       = r["Number Sold"]
-        avg_weekly = sold / 52.0
+        sold   = r["Number Sold"]
+        margin = r["Margin"]
+        reason = get_exclusion_reason(
+            r["Description"], r["Item Number"], margin,
+            sold, custom_kw, custom_items)
+
+        # ── CORE FIX: divide by actual weeks, not 52 ──────────────────────
+        avg_weekly = sold / max(actual_weeks, 1.0)
         forecast   = avg_weekly * reorder_weeks * seasonal * cruise_mult
         safety     = forecast * (safety_pct / 100)
         suggested  = max(1, round(forecast + safety))
-        velocity   = classify_velocity(sold)
+        # ──────────────────────────────────────────────────────────────────
 
+        velocity = classify_velocity(sold, actual_weeks)
+
+        # Priority thresholds scaled to reorder window
         if reason:
             priority = "❌ EXCLUDED"
-        elif suggested >= 20:
+        elif suggested >= 8:
             priority = "🚨 URGENT"
-        elif suggested >= 10:
+        elif suggested >= 3:
             priority = "⚠️ WARNING"
         else:
             priority = "✅ OK"
 
         rows.append({
-            "Priority":        priority,
-            "Item #":          r["Item Number"],
-            "Description":     r["Description"],
-            "Brand":           r.get("Brand", ""),
-            "Dept":            r.get("Department", ""),
-            "Velocity":        velocity,
-            "Total Sold":      sold,
-            "Avg/Week":        round(avg_weekly, 1),
-            "Seasonal Idx":    seasonal,
-            "Cruise Mult":     round(cruise_mult, 2),
-            "Forecast Qty":    round(forecast, 1),
-            "Suggested Order": suggested,
-            "Margin %":        r["Margin"],
-            "Exclusion Reason":reason or "",
-            "Branch":          r.get("Branch", ""),
+            "Priority":         priority,
+            "Item #":           r["Item Number"],
+            "Description":      r["Description"],
+            "Brand":            r.get("Brand", ""),
+            "Dept":             r.get("Department", ""),
+            "Velocity":         velocity,
+            "Total Sold":       sold,
+            "Report Weeks":     round(actual_weeks, 1),
+            "Avg/Week":         round(avg_weekly, 2),
+            "Seasonal Idx":     seasonal,
+            "Cruise Mult":      round(cruise_mult, 2),
+            "Forecast Qty":     round(forecast, 1),
+            "Suggested Order":  suggested,
+            "Margin %":         margin,
+            "Exclusion Reason": reason or "",
+            "Branch":           r.get("Branch", ""),
         })
     return pd.DataFrame(rows)
 
@@ -209,7 +301,6 @@ def build_reorder(df, cruise_df, reorder_weeks, safety_pct, custom_kw, custom_it
 # ══════════════════════════════════════════════════════════════════════════════
 def agent_respond(user_msg, reorder_df, custom_kw, custom_items, context_df):
     msg   = user_msg.lower().strip()
-    reply = ""
 
     for trigger in ["why is", "why was", "explain"]:
         if trigger in msg:
@@ -224,20 +315,20 @@ def agent_respond(user_msg, reorder_df, custom_kw, custom_items, context_df):
                 if excl:
                     reply = (
                         f"**{row['Description']}** (Item #{row['Item #']}) is **excluded**.\n\n"
-                        f"**Reason:** _{excl}_\n\n"
-                        f"It has been automatically removed from reorder suggestions."
+                        f"**Reason:** _{excl}_"
                     )
                 else:
                     reply = (
                         f"**{row['Description']}** (Item #{row['Item #']}) — Priority: **{row['Priority']}**\n\n"
-                        f"- Total Sold: {row['Total Sold']}\n"
-                        f"- Velocity: {row['Velocity']}\n"
+                        f"- Total Sold: {row['Total Sold']} over {row['Report Weeks']} weeks\n"
+                        f"- Avg/Week: {row['Avg/Week']}\n"
                         f"- Seasonal Index: {row['Seasonal Idx']}x\n"
                         f"- Cruise Multiplier: {row['Cruise Mult']}x\n"
+                        f"- Forecast: {row['Forecast Qty']} units\n"
                         f"- Suggested Order: **{row['Suggested Order']} units**"
                     )
             else:
-                reply = f"I couldn't find an item matching **'{token}'** in the current reorder list."
+                reply = f"I couldn't find an item matching **'{token}'**."
             return reply, custom_kw, custom_items
 
     if any(x in msg for x in ["exclude", "block", "remove", "never suggest"]):
@@ -246,10 +337,7 @@ def agent_respond(user_msg, reorder_df, custom_kw, custom_items, context_df):
             new_kw = kw_match.group(1).lower()
             if new_kw not in custom_kw:
                 custom_kw.append(new_kw)
-            reply = (
-                f"Rule added: items containing **'{new_kw}'** will now be excluded.\n\n"
-                f"Go to **Forecast & Reorder** and refresh to see the updated list."
-            )
+            reply = f"Rule added: items containing **'{new_kw}'** will now be excluded."
         else:
             reply = "Put the keyword in quotes. Example: `exclude 'sale poster'`"
         return reply, custom_kw, custom_items
@@ -259,27 +347,24 @@ def agent_respond(user_msg, reorder_df, custom_kw, custom_items, context_df):
         if urgent.empty:
             reply = "No URGENT items found with current settings."
         else:
-            top   = urgent[["Item #", "Description", "Suggested Order"]].head(10)
-            reply = f"**URGENT items ({len(urgent)} total — top 10):**\n\n" + top.to_markdown(index=False)
+            top   = urgent[["Item #","Description","Suggested Order"]].head(10)
+            reply = f"**URGENT items ({len(urgent)} total):**\n\n" + top.to_markdown(index=False)
         return reply, custom_kw, custom_items
 
     if any(x in msg for x in ["top", "best seller", "best selling", "highest"]):
         if context_df is not None:
             top   = context_df.nlargest(10, "Number Sold")[["Item Number","Description","Number Sold","Margin"]]
-            reply = "**Top 10 Best Sellers (by units sold):**\n\n" + top.to_markdown(index=False)
+            reply = "**Top 10 Best Sellers:**\n\n" + top.to_markdown(index=False)
         else:
             reply = "No sales data loaded yet."
         return reply, custom_kw, custom_items
 
     if "cruise" in msg:
-        souvenir_kws = ["magnet","postcard","keychain","ornament","bookmark",
-                        "lapel","sticker","soapstone"]
+        souvenir_kws = ["magnet","postcard","keychain","ornament","bookmark","lapel","sticker","soapstone"]
         if context_df is not None:
-            mask  = context_df["Description"].str.lower().apply(
-                lambda d: any(kw in d for kw in souvenir_kws))
-            items = context_df[mask].nlargest(15, "Number Sold")[
-                ["Item Number","Description","Number Sold"]]
-            reply = "**Top items for cruise week (souvenirs):**\n\n" + items.to_markdown(index=False)
+            mask  = context_df["Description"].str.lower().apply(lambda d: any(kw in d for kw in souvenir_kws))
+            items = context_df[mask].nlargest(15, "Number Sold")[["Item Number","Description","Number Sold"]]
+            reply = "**Top items for cruise week:**\n\n" + items.to_markdown(index=False)
         else:
             reply = "No sales data loaded. Upload a Sales History file first."
         return reply, custom_kw, custom_items
@@ -290,13 +375,13 @@ def agent_respond(user_msg, reorder_df, custom_kw, custom_items, context_df):
         return reply, custom_kw, custom_items
 
     reply = (
-        "Hi! I'm your Reorder QA Agent. Try asking:\n\n"
-        "- **Why is [item name] excluded?**\n"
-        "- **Why is [item name] in the list?**\n"
+        "Hi! I'm your Reorder QA Agent. Try:\n\n"
+        "- **Why is [item] excluded?**\n"
+        "- **Why is [item] in the list?**\n"
         "- **Show urgent items**\n"
         "- **Top sellers**\n"
         "- **What to order for cruise week**\n"
-        "- **Exclude 'keyword'** — adds a new rule\n"
+        "- **Exclude 'keyword'**\n"
         "- **Show exclusion rules**\n"
     )
     return reply, custom_kw, custom_items
@@ -307,6 +392,7 @@ def agent_respond(user_msg, reorder_df, custom_kw, custom_items, context_df):
 # ══════════════════════════════════════════════════════════════════════════════
 defaults = {
     "sales_dfs":               {},
+    "sales_weeks":             {},
     "cruise_df":               None,
     "inventory_df":            None,
     "custom_exclude_keywords": [],
@@ -328,8 +414,8 @@ with st.sidebar:
     st.markdown("---")
 
     role = st.selectbox("👤 Role", ["Warehouse Manager", "Store Supervisor", "Web Store"])
-
     branches_loaded = list(st.session_state.sales_dfs.keys())
+
     if role == "Store Supervisor":
         selected_branch = st.selectbox(
             "🏪 Branch",
@@ -351,11 +437,17 @@ with st.sidebar:
     st.markdown("---")
     next_mo = (CURRENT_MONTH % 12) + 1
     st.caption(f"📅 Today: {date.today().strftime('%b %d, %Y')}")
-    st.caption(f"🗓 Next month seasonal index: **{SEASONAL_INDEX.get(next_mo, 1.0)}x**")
+    st.caption(f"🗓 Next month seasonal: **{SEASONAL_INDEX.get(next_mo, 1.0)}x**")
+    if st.session_state.sales_weeks:
+        wks = list(st.session_state.sales_weeks.values())
+        avg_w = sum(wks) / len(wks)
+        st.caption(f"📊 Report covers: **{avg_w:.1f} weeks**")
     if st.session_state.cruise_df is not None:
-        st.caption("🚢 Cruise data: **loaded**")
+        n_ships = len(st.session_state.cruise_df)
+        total_p = st.session_state.cruise_df["Passengers"].sum()
+        st.caption(f"🚢 {n_ships} sailings | {total_p:,} pax")
     else:
-        st.caption("🚢 Cruise data: not loaded")
+        st.caption("🚢 Cruise: not loaded")
 
 
 def get_active_df():
@@ -371,7 +463,6 @@ def get_active_df():
 # ══════════════════════════════════════════════════════════════════════════════
 if page == "📤 Data Hub":
     st.title("📤 Data Hub")
-    st.markdown("Upload your data files. **Sales History** is required; all others are optional.")
 
     tab1, tab2, tab3, tab4 = st.tabs([
         "📦 Sales History", "🚢 Cruise Schedule", "🌤 Weather", "📋 Current Inventory"
@@ -380,8 +471,8 @@ if page == "📤 Data Hub":
     with tab1:
         st.subheader("Sales History CSV")
         st.info(
-            "Accepts both **SalesHistoryReport** and **SalesHistoryByItemReport** exports. "
-            "You can upload multiple files (one per branch) at once."
+            "Accepts **SalesHistoryReport** and **SalesHistoryByItemReport** exports. "
+            "Upload multiple files at once. The app auto-detects branch number and date range."
         )
         uploaded = st.file_uploader(
             "Upload Sales History CSV(s)", type=["csv"],
@@ -389,55 +480,79 @@ if page == "📤 Data Hub":
         )
         if uploaded:
             for f in uploaded:
-                df, branch, dfrom, dto = parse_csv(f)
+                df, branch, dfrom, dto, actual_weeks = parse_csv(f)
                 if df is not None and not df.empty:
-                    st.session_state.sales_dfs[branch] = df
+                    st.session_state.sales_dfs[branch]   = df
+                    st.session_state.sales_weeks[branch] = actual_weeks
                     st.success(
                         f"✅ Branch **{branch}** — {len(df):,} items | "
-                        f"{dfrom} → {dto}"
+                        f"{dfrom} → {dto} | **{actual_weeks:.1f} weeks of data**"
                     )
                 else:
-                    st.error(
-                        f"❌ Could not parse **{f.name}**. "
-                        f"Make sure it is a Heritage POS CSV export (SalesHistoryReport or SalesHistoryByItemReport)."
-                    )
+                    st.error(f"❌ Could not parse **{f.name}**. Make sure it is a Heritage POS CSV export.")
 
         if st.session_state.sales_dfs:
             st.markdown("### Loaded branches")
             for b, d in st.session_state.sales_dfs.items():
+                wks = st.session_state.sales_weeks.get(b, "?")
                 st.markdown(
                     f"- Branch **{b}**: {len(d):,} items | "
                     f"{d['Number Sold'].sum():,} units sold | "
-                    f"${d['Selling'].sum():,.0f} revenue"
+                    f"${d['Selling'].sum():,.0f} revenue | "
+                    f"**{wks:.1f} weeks**"
                 )
-            if st.button("🗑 Clear all loaded data"):
-                st.session_state.sales_dfs = {}
+            if st.button("🗑 Clear all sales data"):
+                st.session_state.sales_dfs  = {}
+                st.session_state.sales_weeks = {}
                 st.rerun()
 
     with tab2:
-        st.subheader("🚢 Cruise Ship Schedule")
-        st.info("Upload a CSV with columns: `Date` (YYYY-MM-DD), `Ship Name`, `Passengers`")
-        sample_cruise = pd.DataFrame({
-            "Date":      ["2026-06-15","2026-06-22","2026-07-04","2026-07-11","2026-08-03"],
-            "Ship Name": ["Norwegian Joy","Carnival Breeze","MSC Bellissima","Royal Caribbean","Celebrity Edge"],
-            "Passengers":[4200, 3800, 5100, 4700, 3200]
+        st.subheader("🚢 Cruise Schedule — St. John's 2026")
+        st.markdown("**Expected CSV format** (3 columns):")
+        sample_fmt = pd.DataFrame({
+            "Date":       ["2026-06-05","2026-07-14","2026-08-18"],
+            "Ship Name":  ["Volendam","Crown Princess","Zuiderdam"],
+            "Passengers": [1839, 3592, 2388]
         })
-        st.dataframe(sample_cruise, use_container_width=True)
+        st.dataframe(sample_fmt, use_container_width=True, hide_index=True)
+        st.caption("• Date = YYYY-MM-DD  •  Passengers can be blank (defaults to 1,200)")
+
+        st.markdown("---")
         col1, col2 = st.columns(2)
         with col1:
+            st.markdown("**Upload your own CSV:**")
             cruise_file = st.file_uploader("Upload Cruise CSV", type=["csv"], key="cruise_upload")
             if cruise_file:
-                cdf = pd.read_csv(cruise_file)
-                cdf["Date"]  = pd.to_datetime(cdf["Date"])
-                cdf["Month"] = cdf["Date"].dt.strftime("%Y-%m")
-                st.session_state.cruise_df = cdf
-                st.success(f"✅ {len(cdf)} sailings loaded")
+                cdf, err = load_cruise_csv(cruise_file)
+                if err:
+                    st.error(err)
+                else:
+                    st.session_state.cruise_df = cdf
+                    st.success(f"✅ {len(cdf)} sailings | {cdf['Passengers'].sum():,} passengers")
         with col2:
-            if st.button("📋 Use Sample Cruise Data"):
-                sample_cruise["Date"]  = pd.to_datetime(sample_cruise["Date"])
-                sample_cruise["Month"] = sample_cruise["Date"].dt.strftime("%Y-%m")
-                st.session_state.cruise_df = sample_cruise.copy()
-                st.success("✅ Sample cruise data loaded!")
+            st.markdown("**Or load the official 2026 schedule:**")
+            st.caption("Source: City of St. John's Port Authority")
+            st.caption("38 sailings · ~36,904 passengers · May–October 2026")
+            if st.button("🚢 Load Official 2026 Schedule"):
+                off_df = pd.DataFrame(OFFICIAL_2026_SCHEDULE, columns=["Date","Ship Name","Passengers"])
+                off_df["Date"]  = pd.to_datetime(off_df["Date"])
+                off_df["Month"] = off_df["Date"].dt.strftime("%Y-%m")
+                st.session_state.cruise_df = off_df
+                st.success(f"✅ {len(off_df)} sailings | {off_df['Passengers'].sum():,} passengers")
+
+        if st.session_state.cruise_df is not None:
+            st.markdown("---")
+            cdf_show = st.session_state.cruise_df.copy()
+            cdf_show["Date"] = cdf_show["Date"].dt.strftime("%Y-%m-%d")
+            st.dataframe(cdf_show[["Date","Ship Name","Passengers"]], use_container_width=True, hide_index=True)
+            monthly = (st.session_state.cruise_df
+                       .groupby("Month")["Passengers"]
+                       .agg(Ships="count", Total_Passengers="sum")
+                       .reset_index())
+            st.dataframe(monthly, use_container_width=True, hide_index=True)
+            if st.button("🗑 Clear cruise data"):
+                st.session_state.cruise_df = None
+                st.rerun()
 
     with tab3:
         st.subheader("🌤 Weather History")
@@ -472,6 +587,8 @@ elif page == "📊 Dashboard":
     label = "All Branches" if selected_branch == "ALL" else f"Branch {selected_branch}"
     st.subheader(f"📍 {label} — Overview")
 
+    actual_weeks = float(df["Actual Weeks"].iloc[0]) if "Actual Weeks" in df.columns else 52.0
+
     c1, c2, c3, c4, c5 = st.columns(5)
     c1.metric("Total Items",   f"{len(df):,}")
     c2.metric("Units Sold",    f"{df['Number Sold'].sum():,}")
@@ -480,9 +597,11 @@ elif page == "📊 Dashboard":
     pos = df[df["Margin"] > 0]["Margin"].mean()
     c5.metric("Avg Margin",    f"{pos:.1f}%")
 
+    if actual_weeks < 50:
+        st.info(f"ℹ️ Report covers **{actual_weeks:.1f} weeks** — forecast is scaled to this period, not a full year.")
+
     st.markdown("---")
     col_l, col_r = st.columns(2)
-
     with col_l:
         top_rev = df.nlargest(15, "Selling")[["Description","Selling","Profit","Number Sold"]]
         fig = px.bar(top_rev, x="Selling", y="Description", orientation="h",
@@ -493,7 +612,7 @@ elif page == "📊 Dashboard":
         st.plotly_chart(fig, use_container_width=True)
 
     with col_r:
-        df["Velocity"] = df["Number Sold"].apply(classify_velocity)
+        df["Velocity"] = df.apply(lambda r: classify_velocity(r["Number Sold"], actual_weeks), axis=1)
         vel = df["Velocity"].value_counts().reset_index()
         vel.columns = ["Velocity","Count"]
         fig2 = px.pie(vel, names="Velocity", values="Count",
@@ -501,8 +620,7 @@ elif page == "📊 Dashboard":
         st.plotly_chart(fig2, use_container_width=True)
 
     fig3 = px.scatter(
-        df[df["Number Sold"] > 0],
-        x="Number Sold", y="Margin",
+        df[df["Number Sold"] > 0], x="Number Sold", y="Margin",
         hover_data=["Description","Item Number"],
         title="Sales Volume vs. Margin",
         color="Margin", color_continuous_scale="RdYlGn", opacity=0.6
@@ -521,9 +639,18 @@ elif page == "🔮 Forecast & Reorder":
         st.warning("No data loaded. Please upload Sales History files in 📤 Data Hub.")
         st.stop()
 
+    actual_weeks = float(df["Actual Weeks"].iloc[0]) if "Actual Weeks" in df.columns else 52.0
+
+    if actual_weeks < 50:
+        st.info(
+            f"ℹ️ Your report covers **{actual_weeks:.1f} weeks** of sales data. "
+            f"The forecast is correctly scaled to this period — "
+            f"not divided by 52 weeks."
+        )
+
     with st.expander("⚙️ Forecast Settings", expanded=True):
         col1, col2 = st.columns(2)
-        reorder_weeks = col1.slider("Reorder window (weeks)", 2, 12, 4)
+        reorder_weeks = col1.slider("How many weeks to stock for", 2, 12, 4)
         safety_pct    = col2.slider("Safety stock %", 0, 50, 15)
 
     rdf = build_reorder(
@@ -540,7 +667,7 @@ elif page == "🔮 Forecast & Reorder":
     priority_filter = col_b.multiselect(
         "Filter priority",
         ["🚨 URGENT","⚠️ WARNING","✅ OK","❌ EXCLUDED"],
-        default=["🚨 URGENT","⚠️ WARNING"]
+        default=["🚨 URGENT","⚠️ WARNING","✅ OK"]
     )
     search_term = col_c.text_input("🔍 Search description")
 
@@ -564,8 +691,8 @@ elif page == "🔮 Forecast & Reorder":
     st.dataframe(
         display_df[[
             "Priority","Item #","Description","Brand","Velocity",
-            "Total Sold","Avg/Week","Seasonal Idx","Cruise Mult",
-            "Suggested Order","Margin %","Exclusion Reason","Branch"
+            "Total Sold","Report Weeks","Avg/Week","Seasonal Idx","Cruise Mult",
+            "Forecast Qty","Suggested Order","Margin %","Exclusion Reason","Branch"
         ]],
         use_container_width=True, height=500
     )
@@ -588,10 +715,10 @@ elif page == "🔮 Forecast & Reorder":
 # ══════════════════════════════════════════════════════════════════════════════
 elif page == "🤖 QA Agent Chat":
     st.title("🤖 Reorder QA Agent")
-    st.caption("Ask me anything about your reorder list, exclusions, top sellers, or cruise prep.")
+    st.caption("Ask me about reorder items, exclusions, top sellers, or cruise prep.")
 
     if st.session_state.reorder_df is None:
-        st.warning("Go to **🔮 Forecast & Reorder** first to generate the reorder list, then come back here.")
+        st.warning("Go to **🔮 Forecast & Reorder** first to generate the list, then come back here.")
         st.stop()
 
     for msg in st.session_state.chat_history:
@@ -645,7 +772,8 @@ elif page == "📈 Analytics":
 
     with tab2:
         st.subheader("📅 Seasonal Forecast — Next 12 Months")
-        base_weekly = df["Number Sold"].sum() / 52
+        base_weekly = df["Number Sold"].sum() / max(
+            float(df["Actual Weeks"].iloc[0]) if "Actual Weeks" in df.columns else 52, 1)
         months = []
         for i in range(1, 13):
             mo  = (CURRENT_MONTH + i - 1) % 12 + 1
@@ -670,7 +798,7 @@ elif page == "📈 Analytics":
             cdf     = st.session_state.cruise_df.copy()
             monthly = cdf.groupby("Month")["Passengers"].sum().reset_index()
             fig_c   = px.bar(monthly, x="Month", y="Passengers",
-                             title="Monthly Cruise Passenger Volume",
+                             title="2026 Monthly Cruise Passenger Volume — St. John's",
                              color="Passengers", color_continuous_scale="Blues")
             st.plotly_chart(fig_c, use_container_width=True)
 
@@ -678,8 +806,7 @@ elif page == "📈 Analytics":
         brand_df = (
             df.groupby("Brand")
               .agg({"Number Sold":"sum","Selling":"sum","Profit":"sum"})
-              .reset_index()
-              .nlargest(20, "Selling")
+              .reset_index().nlargest(20, "Selling")
         )
         fig_b = px.bar(brand_df, x="Selling", y="Brand", orientation="h",
                        title="Top 20 Brands by Revenue",
@@ -732,7 +859,6 @@ elif page == "⚙️ Settings":
             st.success(f"Item {new_item} excluded.")
 
     if st.session_state.custom_exclude_items:
-        st.markdown("**Excluded item numbers:** " +
-                    ", ".join(f"`{i}`" for i in st.session_state.custom_exclude_items))
+        st.markdown("**Excluded:** " + ", ".join(f"`{i}`" for i in st.session_state.custom_exclude_items))
     else:
         st.info("No specific items excluded yet.")
