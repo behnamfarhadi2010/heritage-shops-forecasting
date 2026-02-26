@@ -1,3 +1,4 @@
+
 import streamlit as st
 import pandas as pd
 import numpy as np
@@ -72,10 +73,9 @@ OFFICIAL_2026_SCHEDULE = [
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# CSV PARSER — detects actual date range and calculates real weeks
+# CSV PARSER
 # ══════════════════════════════════════════════════════════════════════════════
 def parse_date_range(date_str):
-    """Try multiple date formats used in the POS export."""
     for fmt in ("%d/%b/%Y", "%d-%b-%Y", "%Y-%m-%d", "%m/%d/%Y"):
         try:
             return datetime.strptime(date_str.strip(), fmt)
@@ -107,12 +107,11 @@ def parse_csv(uploaded_file):
                 dt_from   = parse_date_range(date_from)
                 dt_to     = parse_date_range(date_to)
 
-    # Calculate actual weeks in the report — KEY FIX
     if dt_from and dt_to:
         actual_days  = max((dt_to - dt_from).days, 1)
         actual_weeks = actual_days / 7.0
     else:
-        actual_weeks = 52.0   # fallback: assume full year
+        actual_weeks = 52.0
 
     data_rows = []
     in_data   = False
@@ -170,7 +169,7 @@ def parse_csv(uploaded_file):
 
     df = pd.DataFrame(data_rows)
     df["Branch"]       = branch
-    df["Actual Weeks"] = actual_weeks
+    df["Actual Weeks"] = round(actual_weeks, 1)
     return df, branch, date_from, date_to, actual_weeks
 
 
@@ -195,11 +194,21 @@ def load_cruise_csv(uploaded_file):
 # ══════════════════════════════════════════════════════════════════════════════
 # HELPERS
 # ══════════════════════════════════════════════════════════════════════════════
+def safe_weeks(df):
+    """Safely extract actual_weeks from a DataFrame, always returns float."""
+    if df is not None and "Actual Weeks" in df.columns:
+        try:
+            return float(df["Actual Weeks"].iloc[0])
+        except (ValueError, IndexError):
+            pass
+    return 52.0
+
+
 def classify_velocity(sold, actual_weeks):
     weekly = sold / max(actual_weeks, 1)
-    if weekly >= 2:    return "🔥 Fast"
-    if weekly >= 0.5:  return "⚡ Medium"
-    if weekly > 0:     return "🐢 Slow"
+    if weekly >= 2:   return "🔥 Fast"
+    if weekly >= 0.5: return "⚡ Medium"
+    if weekly > 0:    return "🐢 Slow"
     return "💀 Dead"
 
 
@@ -233,8 +242,9 @@ def get_exclusion_reason(desc, item_num, margin, sold, custom_kw, custom_items):
 
 
 def build_reorder(df, cruise_df, reorder_weeks, safety_pct, custom_kw, custom_items):
-    next_month = (CURRENT_MONTH % 12) + 1
-    seasonal   = SEASONAL_INDEX.get(next_month, 1.0)
+    next_month  = (CURRENT_MONTH % 12) + 1
+    seasonal    = SEASONAL_INDEX.get(next_month, 1.0)
+    actual_weeks = safe_weeks(df)
 
     cruise_mult = 1.0
     if cruise_df is not None and not cruise_df.empty:
@@ -245,9 +255,6 @@ def build_reorder(df, cruise_df, reorder_weeks, safety_pct, custom_kw, custom_it
             elif pax > 2000: cruise_mult = 1.20
             elif pax > 0:    cruise_mult = 1.10
 
-    # Use actual weeks from the report (per row or fallback)
-    actual_weeks = float(df["Actual Weeks"].iloc[0]) if "Actual Weeks" in df.columns else 52.0
-
     rows = []
     for _, r in df.iterrows():
         sold   = r["Number Sold"]
@@ -256,16 +263,12 @@ def build_reorder(df, cruise_df, reorder_weeks, safety_pct, custom_kw, custom_it
             r["Description"], r["Item Number"], margin,
             sold, custom_kw, custom_items)
 
-        # ── CORE FIX: divide by actual weeks, not 52 ──────────────────────
         avg_weekly = sold / max(actual_weeks, 1.0)
         forecast   = avg_weekly * reorder_weeks * seasonal * cruise_mult
         safety     = forecast * (safety_pct / 100)
         suggested  = max(1, round(forecast + safety))
-        # ──────────────────────────────────────────────────────────────────
+        velocity   = classify_velocity(sold, actual_weeks)
 
-        velocity = classify_velocity(sold, actual_weeks)
-
-        # Priority thresholds scaled to reorder window
         if reason:
             priority = "❌ EXCLUDED"
         elif suggested >= 8:
@@ -300,7 +303,7 @@ def build_reorder(df, cruise_df, reorder_weeks, safety_pct, custom_kw, custom_it
 # QA AGENT
 # ══════════════════════════════════════════════════════════════════════════════
 def agent_respond(user_msg, reorder_df, custom_kw, custom_items, context_df):
-    msg   = user_msg.lower().strip()
+    msg = user_msg.lower().strip()
 
     for trigger in ["why is", "why was", "explain"]:
         if trigger in msg:
@@ -438,13 +441,16 @@ with st.sidebar:
     next_mo = (CURRENT_MONTH % 12) + 1
     st.caption(f"📅 Today: {date.today().strftime('%b %d, %Y')}")
     st.caption(f"🗓 Next month seasonal: **{SEASONAL_INDEX.get(next_mo, 1.0)}x**")
+
+    # ── FIXED: safe formatting of weeks ──────────────────────────────────────
     if st.session_state.sales_weeks:
-        wks = list(st.session_state.sales_weeks.values())
-        avg_w = sum(wks) / len(wks)
+        wks_values = [float(v) for v in st.session_state.sales_weeks.values()]
+        avg_w = sum(wks_values) / len(wks_values)
         st.caption(f"📊 Report covers: **{avg_w:.1f} weeks**")
+
     if st.session_state.cruise_df is not None:
         n_ships = len(st.session_state.cruise_df)
-        total_p = st.session_state.cruise_df["Passengers"].sum()
+        total_p = int(st.session_state.cruise_df["Passengers"].sum())
         st.caption(f"🚢 {n_ships} sailings | {total_p:,} pax")
     else:
         st.caption("🚢 Cruise: not loaded")
@@ -472,7 +478,7 @@ if page == "📤 Data Hub":
         st.subheader("Sales History CSV")
         st.info(
             "Accepts **SalesHistoryReport** and **SalesHistoryByItemReport** exports. "
-            "Upload multiple files at once. The app auto-detects branch number and date range."
+            "Upload multiple files at once. Branch number and date range are auto-detected."
         )
         uploaded = st.file_uploader(
             "Upload Sales History CSV(s)", type=["csv"],
@@ -483,7 +489,7 @@ if page == "📤 Data Hub":
                 df, branch, dfrom, dto, actual_weeks = parse_csv(f)
                 if df is not None and not df.empty:
                     st.session_state.sales_dfs[branch]   = df
-                    st.session_state.sales_weeks[branch] = actual_weeks
+                    st.session_state.sales_weeks[branch] = float(actual_weeks)
                     st.success(
                         f"✅ Branch **{branch}** — {len(df):,} items | "
                         f"{dfrom} → {dto} | **{actual_weeks:.1f} weeks of data**"
@@ -494,15 +500,15 @@ if page == "📤 Data Hub":
         if st.session_state.sales_dfs:
             st.markdown("### Loaded branches")
             for b, d in st.session_state.sales_dfs.items():
-                wks = st.session_state.sales_weeks.get(b, "?")
+                wks = float(st.session_state.sales_weeks.get(b, 52.0))
                 st.markdown(
                     f"- Branch **{b}**: {len(d):,} items | "
-                    f"{d['Number Sold'].sum():,} units sold | "
+                    f"{int(d['Number Sold'].sum()):,} units sold | "
                     f"${d['Selling'].sum():,.0f} revenue | "
                     f"**{wks:.1f} weeks**"
                 )
             if st.button("🗑 Clear all sales data"):
-                st.session_state.sales_dfs  = {}
+                st.session_state.sales_dfs   = {}
                 st.session_state.sales_weeks = {}
                 st.rerun()
 
@@ -528,7 +534,7 @@ if page == "📤 Data Hub":
                     st.error(err)
                 else:
                     st.session_state.cruise_df = cdf
-                    st.success(f"✅ {len(cdf)} sailings | {cdf['Passengers'].sum():,} passengers")
+                    st.success(f"✅ {len(cdf)} sailings | {int(cdf['Passengers'].sum()):,} passengers")
         with col2:
             st.markdown("**Or load the official 2026 schedule:**")
             st.caption("Source: City of St. John's Port Authority")
@@ -538,7 +544,7 @@ if page == "📤 Data Hub":
                 off_df["Date"]  = pd.to_datetime(off_df["Date"])
                 off_df["Month"] = off_df["Date"].dt.strftime("%Y-%m")
                 st.session_state.cruise_df = off_df
-                st.success(f"✅ {len(off_df)} sailings | {off_df['Passengers'].sum():,} passengers")
+                st.success(f"✅ {len(off_df)} sailings | {int(off_df['Passengers'].sum()):,} passengers")
 
         if st.session_state.cruise_df is not None:
             st.markdown("---")
@@ -584,21 +590,20 @@ elif page == "📊 Dashboard":
         st.warning("No data loaded. Please upload Sales History files in 📤 Data Hub.")
         st.stop()
 
-    label = "All Branches" if selected_branch == "ALL" else f"Branch {selected_branch}"
+    label        = "All Branches" if selected_branch == "ALL" else f"Branch {selected_branch}"
+    actual_weeks = safe_weeks(df)
     st.subheader(f"📍 {label} — Overview")
-
-    actual_weeks = float(df["Actual Weeks"].iloc[0]) if "Actual Weeks" in df.columns else 52.0
 
     c1, c2, c3, c4, c5 = st.columns(5)
     c1.metric("Total Items",   f"{len(df):,}")
-    c2.metric("Units Sold",    f"{df['Number Sold'].sum():,}")
+    c2.metric("Units Sold",    f"{int(df['Number Sold'].sum()):,}")
     c3.metric("Total Revenue", f"${df['Selling'].sum():,.0f}")
     c4.metric("Total Profit",  f"${df['Profit'].sum():,.0f}")
     pos = df[df["Margin"] > 0]["Margin"].mean()
     c5.metric("Avg Margin",    f"{pos:.1f}%")
 
     if actual_weeks < 50:
-        st.info(f"ℹ️ Report covers **{actual_weeks:.1f} weeks** — forecast is scaled to this period, not a full year.")
+        st.info(f"ℹ️ Report covers **{actual_weeks:.1f} weeks** — forecast is scaled accordingly.")
 
     st.markdown("---")
     col_l, col_r = st.columns(2)
@@ -639,13 +644,11 @@ elif page == "🔮 Forecast & Reorder":
         st.warning("No data loaded. Please upload Sales History files in 📤 Data Hub.")
         st.stop()
 
-    actual_weeks = float(df["Actual Weeks"].iloc[0]) if "Actual Weeks" in df.columns else 52.0
-
+    actual_weeks = safe_weeks(df)
     if actual_weeks < 50:
         st.info(
             f"ℹ️ Your report covers **{actual_weeks:.1f} weeks** of sales data. "
-            f"The forecast is correctly scaled to this period — "
-            f"not divided by 52 weeks."
+            f"The forecast divides by this period — not by 52 weeks."
         )
 
     with st.expander("⚙️ Forecast Settings", expanded=True):
@@ -758,6 +761,7 @@ elif page == "📈 Analytics":
         st.warning("No data loaded.")
         st.stop()
 
+    actual_weeks = safe_weeks(df)
     tab1, tab2, tab3 = st.tabs(["🏆 Top Performers", "🔮 Seasonal Forecast", "🏪 Brand Analysis"])
 
     with tab1:
@@ -772,8 +776,7 @@ elif page == "📈 Analytics":
 
     with tab2:
         st.subheader("📅 Seasonal Forecast — Next 12 Months")
-        base_weekly = df["Number Sold"].sum() / max(
-            float(df["Actual Weeks"].iloc[0]) if "Actual Weeks" in df.columns else 52, 1)
+        base_weekly = df["Number Sold"].sum() / max(actual_weeks, 1)
         months = []
         for i in range(1, 13):
             mo  = (CURRENT_MONTH + i - 1) % 12 + 1
