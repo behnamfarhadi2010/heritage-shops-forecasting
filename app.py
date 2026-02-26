@@ -73,16 +73,14 @@ OFFICIAL_2026_SCHEDULE = [
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# UTILITY: tabulate-free markdown table (no extra dependencies)
+# UTILITIES
 # ══════════════════════════════════════════════════════════════════════════════
 def df_to_md(df):
-    """Convert a small DataFrame to a markdown table without tabulate."""
-    cols = list(df.columns)
+    cols   = list(df.columns)
     header = "| " + " | ".join(str(c) for c in cols) + " |"
     sep    = "| " + " | ".join("---" for _ in cols) + " |"
-    rows   = []
-    for _, row in df.iterrows():
-        rows.append("| " + " | ".join(str(row[c]) for c in cols) + " |")
+    rows   = ["| " + " | ".join(str(row[c]) for c in cols) + " |"
+              for _, row in df.iterrows()]
     return "\n".join([header, sep] + rows)
 
 
@@ -303,12 +301,11 @@ def build_reorder(df, cruise_df, reorder_weeks, safety_pct, custom_kw, custom_it
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# QA AGENT  — uses df_to_md() instead of .to_markdown()
+# QA AGENT
 # ══════════════════════════════════════════════════════════════════════════════
 def agent_respond(user_msg, reorder_df, custom_kw, custom_items, context_df):
     msg = user_msg.lower().strip()
 
-    # ── Why is / Explain ─────────────────────────────────────────────────────
     for trigger in ["why is", "why was", "explain"]:
         if trigger in msg:
             token = msg.split(trigger)[-1].strip().rstrip("?").strip()
@@ -338,7 +335,6 @@ def agent_respond(user_msg, reorder_df, custom_kw, custom_items, context_df):
                 reply = f"I couldn't find an item matching **'{token}'**."
             return reply, custom_kw, custom_items
 
-    # ── Custom exclusion rule ─────────────────────────────────────────────────
     if any(x in msg for x in ["exclude", "block", "remove", "never suggest"]):
         kw_match = re.search(r"[\"'](.*?)[\"']", msg)
         if kw_match:
@@ -350,7 +346,6 @@ def agent_respond(user_msg, reorder_df, custom_kw, custom_items, context_df):
             reply = "Put the keyword in quotes. Example: `exclude 'sale poster'`"
         return reply, custom_kw, custom_items
 
-    # ── Urgent items ──────────────────────────────────────────────────────────
     if "urgent" in msg or "critical" in msg:
         urgent = reorder_df[reorder_df["Priority"] == "🚨 URGENT"]
         if urgent.empty:
@@ -360,17 +355,15 @@ def agent_respond(user_msg, reorder_df, custom_kw, custom_items, context_df):
             reply = f"**🚨 URGENT items ({len(urgent)} total — top 10):**\n\n" + df_to_md(top)
         return reply, custom_kw, custom_items
 
-    # ── Warning items ─────────────────────────────────────────────────────────
     if "warning" in msg:
         warn = reorder_df[reorder_df["Priority"] == "⚠️ WARNING"]
         if warn.empty:
-            reply = "No WARNING items found with current settings."
+            reply = "No WARNING items found."
         else:
             top   = warn[["Item #","Description","Suggested Order"]].head(10)
             reply = f"**⚠️ WARNING items ({len(warn)} total — top 10):**\n\n" + df_to_md(top)
         return reply, custom_kw, custom_items
 
-    # ── Top sellers ───────────────────────────────────────────────────────────
     if any(x in msg for x in ["top", "best seller", "best selling", "highest"]):
         if context_df is not None:
             top   = context_df.nlargest(10, "Number Sold")[["Item Number","Description","Number Sold","Margin"]]
@@ -379,7 +372,6 @@ def agent_respond(user_msg, reorder_df, custom_kw, custom_items, context_df):
             reply = "No sales data loaded yet."
         return reply, custom_kw, custom_items
 
-    # ── Cruise prep ───────────────────────────────────────────────────────────
     if "cruise" in msg:
         souvenir_kws = ["magnet","postcard","keychain","ornament","bookmark","lapel","sticker","soapstone"]
         if context_df is not None:
@@ -394,13 +386,11 @@ def agent_respond(user_msg, reorder_df, custom_kw, custom_items, context_df):
             reply = "No sales data loaded. Upload a Sales History file first."
         return reply, custom_kw, custom_items
 
-    # ── Exclusion rules ───────────────────────────────────────────────────────
     if "rule" in msg or "exclusion" in msg:
         all_rules = EXCLUDE_KEYWORDS + custom_kw
         reply = "**Current exclusion rules:**\n\n" + "\n".join(f"- `{r}`" for r in all_rules)
         return reply, custom_kw, custom_items
 
-    # ── Summary ───────────────────────────────────────────────────────────────
     if "summary" in msg or "overview" in msg:
         n_urgent = len(reorder_df[reorder_df["Priority"] == "🚨 URGENT"])
         n_warn   = len(reorder_df[reorder_df["Priority"] == "⚠️ WARNING"])
@@ -417,7 +407,6 @@ def agent_respond(user_msg, reorder_df, custom_kw, custom_items, context_df):
         )
         return reply, custom_kw, custom_items
 
-    # ── Default help ──────────────────────────────────────────────────────────
     reply = (
         "Hi! I'm your Reorder QA Agent. Try:\n\n"
         "- **Show urgent items**\n"
@@ -647,7 +636,14 @@ elif page == "📊 Dashboard":
     if actual_weeks < 50:
         st.info(f"ℹ️ Report covers **{actual_weeks:.1f} weeks** — forecast is scaled accordingly.")
 
+    # Assign velocity to every item
+    df["Velocity"] = df.apply(
+        lambda r: classify_velocity(r["Number Sold"], actual_weeks), axis=1
+    )
+
     st.markdown("---")
+
+    # ── Charts row ────────────────────────────────────────────────────────────
     col_l, col_r = st.columns(2)
     with col_l:
         top_rev = df.nlargest(15, "Selling")[["Description","Selling","Profit","Number Sold"]]
@@ -659,10 +655,9 @@ elif page == "📊 Dashboard":
         st.plotly_chart(fig, use_container_width=True)
 
     with col_r:
-        df["Velocity"] = df.apply(lambda r: classify_velocity(r["Number Sold"], actual_weeks), axis=1)
-        vel = df["Velocity"].value_counts().reset_index()
-        vel.columns = ["Velocity","Count"]
-        fig2 = px.pie(vel, names="Velocity", values="Count",
+        vel_counts = df["Velocity"].value_counts().reset_index()
+        vel_counts.columns = ["Velocity","Count"]
+        fig2 = px.pie(vel_counts, names="Velocity", values="Count",
                       title="Item Velocity Distribution", hole=0.4)
         st.plotly_chart(fig2, use_container_width=True)
 
@@ -674,6 +669,36 @@ elif page == "📊 Dashboard":
     )
     fig3.add_hline(y=0, line_dash="dash", line_color="red", annotation_text="Zero margin")
     st.plotly_chart(fig3, use_container_width=True)
+
+    # ── Items by Velocity — 4 side-by-side columns ────────────────────────────
+    st.markdown("---")
+    st.subheader("📦 Items by Velocity")
+
+    vel_groups = {
+        "🔥 Fast":   df[df["Velocity"] == "🔥 Fast"].sort_values("Number Sold", ascending=False),
+        "⚡ Medium": df[df["Velocity"] == "⚡ Medium"].sort_values("Number Sold", ascending=False),
+        "🐢 Slow":   df[df["Velocity"] == "🐢 Slow"].sort_values("Number Sold", ascending=False),
+        "💀 Dead":   df[df["Velocity"] == "💀 Dead"].sort_values("Description"),
+    }
+
+    col_fast, col_med, col_slow, col_dead = st.columns(4)
+
+    for col, (label, subset) in zip(
+        [col_fast, col_med, col_slow, col_dead],
+        vel_groups.items()
+    ):
+        with col:
+            st.markdown(f"### {label}")
+            st.caption(f"{len(subset):,} items · {int(subset['Number Sold'].sum()):,} sold")
+            if subset.empty:
+                st.info("None")
+            else:
+                # Show Item # + Description + Units Sold in a compact table
+                display = subset[["Item Number", "Description", "Number Sold"]].rename(columns={
+                    "Item Number":  "Item #",
+                    "Number Sold":  "Sold",
+                }).reset_index(drop=True)
+                st.dataframe(display, use_container_width=True, height=500, hide_index=True)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
