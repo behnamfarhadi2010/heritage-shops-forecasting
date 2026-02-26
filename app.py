@@ -1,3 +1,4 @@
+
 import streamlit as st
 import pandas as pd
 import numpy as np
@@ -5,8 +6,6 @@ import plotly.express as px
 import re
 import io
 import csv as _csv
-import time
-import requests
 from datetime import datetime, date
 
 st.set_page_config(
@@ -72,192 +71,23 @@ OFFICIAL_2026_SCHEDULE = [
     ("2026-10-11","Ocean Victory",186),
 ]
 
-REPORT_PATHS = {
-    "SalesHistoryReport":       "/public/Common/Dashboard/SalesHistoryReport",
-    "SalesHistoryByItemReport": "/public/Common/Dashboard/SalesHistoryByItemReport",
-    "DealerOverviewReport":     "/public/Common/Dashboard/DealerOverviewReport",
-    "InventoryReport":          "/public/Common/Dashboard/InventoryReport",
-}
-
 
 # ══════════════════════════════════════════════════════════════════════════════
-# JASPER CONNECTOR — built into app
-# ══════════════════════════════════════════════════════════════════════════════
-@st.cache_resource(show_spinner=False)
-def get_jasper_session():
-    """Returns a persistent requests.Session for the app lifetime."""
-    return {"session": requests.Session(), "authenticated": False}
-
-
-def jasper_login(ctx):
-    """Authenticate with JasperReports Server using credentials from Streamlit secrets."""
-    try:
-        url  = st.secrets.get("JASPER_URL", "").rstrip("/")
-        org  = st.secrets.get("JASPER_ORG", "")
-        user = st.secrets.get("JASPER_USER", "")
-        pwd  = st.secrets.get("JASPER_PASSWORD", "")
-    except Exception:
-        return False, "❌ No credentials found. Add them to Streamlit Secrets."
-
-    if not all([url, user, pwd]):
-        return False, "❌ Credentials incomplete in Streamlit Secrets."
-
-    login_user = f"{user}|{org}" if org else user
-    login_url  = f"{url}/j_spring_security_check"
-
-    try:
-        resp = ctx["session"].post(
-            login_url,
-            data={
-                "j_username": login_user,
-                "j_password": pwd,
-                "_eventId":   "submit",
-                "forceDefaultLocale": "false",
-            },
-            allow_redirects=True,
-            timeout=15,
-        )
-        if resp.status_code == 200 and "JSESSIONID" in ctx["session"].cookies:
-            ctx["authenticated"] = True
-            return True, "✅ Connected to MMS POS server"
-        return False, f"❌ Login failed (HTTP {resp.status_code}). Check credentials."
-    except requests.exceptions.ConnectionError:
-        return False, "❌ Cannot reach the server. Check network/VPN."
-    except requests.exceptions.Timeout:
-        return False, "❌ Server timed out."
-    except Exception as e:
-        return False, f"❌ Error: {e}"
-
-
-def jasper_fetch(ctx, report_key, date_from, date_to, branch="ALL"):
-    """
-    Run a JasperReports report and return (DataFrame, message).
-    Authenticates automatically if not already logged in.
-    """
-    if not ctx["authenticated"]:
-        ok, msg = jasper_login(ctx)
-        if not ok:
-            return None, msg
-
-    url         = st.secrets.get("JASPER_URL", "").rstrip("/")
-    report_path = REPORT_PATHS.get(report_key)
-    if not report_path:
-        return None, f"Unknown report: {report_key}"
-
-    exec_url = f"{url}/rest_v2/reportExecutions"
-    body = f"""<?xml version="1.0" encoding="UTF-8"?>
-    <reportExecutionRequest>
-        <reportUnitUri>{report_path}</reportUnitUri>
-        <async>false</async>
-        <freshData>true</freshData>
-        <outputFormat>csv</outputFormat>
-        <ignorePagination>true</ignorePagination>
-        <parameters>
-            <reportParameter name="Branch"><value>{branch}</value></reportParameter>
-            <reportParameter name="DateFrom"><value>{date_from}</value></reportParameter>
-            <reportParameter name="DateTo"><value>{date_to}</value></reportParameter>
-        </parameters>
-    </reportExecutionRequest>"""
-
-    try:
-        resp = ctx["session"].post(
-            exec_url,
-            data=body,
-            headers={"Content-Type": "application/xml", "Accept": "application/json"},
-            timeout=30,
-        )
-    except Exception as e:
-        return None, f"❌ Request failed: {e}"
-
-    if resp.status_code not in (200, 201):
-        return None, f"❌ Server error HTTP {resp.status_code}: {resp.text[:300]}"
-
-    result     = resp.json()
-    request_id = result.get("requestId")
-    exports    = result.get("exports", [])
-    status     = result.get("status", "ready")
-
-    if not request_id:
-        return None, "❌ No requestId returned."
-
-    # Poll until ready
-    for _ in range(12):
-        if status == "ready":
-            break
-        time.sleep(2)
-        poll = ctx["session"].get(
-            f"{exec_url}/{request_id}",
-            headers={"Accept": "application/json"},
-            timeout=15,
-        )
-        if poll.status_code == 200:
-            status  = poll.json().get("status", "queued")
-            exports = poll.json().get("exports", exports)
-
-    if status != "ready":
-        return None, f"❌ Report timed out (status: {status})"
-
-    if not exports:
-        return None, "❌ No export output found."
-
-    export_id = exports[0].get("id")
-    if not export_id:
-        return None, "❌ No export ID."
-
-    try:
-        dl = ctx["session"].get(
-            f"{exec_url}/{request_id}/exports/{export_id}/outputResource",
-            timeout=30,
-        )
-    except Exception as e:
-        return None, f"❌ Download failed: {e}"
-
-    if dl.status_code != 200:
-        return None, f"❌ Download HTTP {dl.status_code}"
-
-    try:
-        df = pd.read_csv(io.StringIO(dl.text))
-        return df, f"✅ {len(df):,} rows fetched"
-    except Exception as e:
-        return None, f"❌ CSV parse error: {e}"
-
-
-def jasper_list_reports(ctx):
-    """Browse available reports on the server."""
-    if not ctx["authenticated"]:
-        ok, msg = jasper_login(ctx)
-        if not ok:
-            return [], msg
-    url = st.secrets.get("JASPER_URL", "").rstrip("/")
-    try:
-        resp = ctx["session"].get(
-            f"{url}/rest_v2/resources?type=reportUnit&folderUri=/public",
-            headers={"Accept": "application/json"},
-            timeout=15,
-        )
-        if resp.status_code == 200:
-            data    = resp.json()
-            reports = [r.get("uri", "") for r in data.get("resourceLookup", [])]
-            return reports, f"✅ {len(reports)} reports found"
-        return [], f"❌ HTTP {resp.status_code}"
-    except Exception as e:
-        return [], f"❌ {e}"
-
-
-# ══════════════════════════════════════════════════════════════════════════════
-# UTILITY
+# UTILITY: tabulate-free markdown table (no extra dependencies)
 # ══════════════════════════════════════════════════════════════════════════════
 def df_to_md(df):
-    cols   = list(df.columns)
+    """Convert a small DataFrame to a markdown table without tabulate."""
+    cols = list(df.columns)
     header = "| " + " | ".join(str(c) for c in cols) + " |"
     sep    = "| " + " | ".join("---" for _ in cols) + " |"
-    rows   = ["| " + " | ".join(str(row[c]) for c in cols) + " |"
-              for _, row in df.iterrows()]
+    rows   = []
+    for _, row in df.iterrows():
+        rows.append("| " + " | ".join(str(row[c]) for c in cols) + " |")
     return "\n".join([header, sep] + rows)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# CSV PARSER (manual upload fallback)
+# CSV PARSER
 # ══════════════════════════════════════════════════════════════════════════════
 def parse_date_range(date_str):
     for fmt in ("%d/%b/%Y", "%d-%b-%Y", "%Y-%m-%d", "%m/%d/%Y"):
@@ -291,7 +121,11 @@ def parse_csv(uploaded_file):
                 dt_from   = parse_date_range(date_from)
                 dt_to     = parse_date_range(date_to)
 
-    actual_weeks = (max((dt_to - dt_from).days, 1) / 7.0) if (dt_from and dt_to) else 52.0
+    if dt_from and dt_to:
+        actual_days  = max((dt_to - dt_from).days, 1)
+        actual_weeks = actual_days / 7.0
+    else:
+        actual_weeks = 52.0
 
     data_rows = []
     in_data   = False
@@ -304,7 +138,9 @@ def parse_csv(uploaded_file):
         if stripped.startswith("Supplier,Product") or stripped.startswith("Supplier Product"):
             in_data = False
             continue
-        if not in_data or not stripped or stripped.startswith(","):
+        if not in_data or not stripped:
+            continue
+        if stripped.startswith(","):
             continue
 
         reader = _csv.reader(io.StringIO(stripped))
@@ -366,7 +202,7 @@ def load_cruise_csv(uploaded_file):
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# FORECAST HELPERS
+# HELPERS
 # ══════════════════════════════════════════════════════════════════════════════
 def safe_weeks(df):
     if df is not None and "Actual Weeks" in df.columns:
@@ -467,11 +303,12 @@ def build_reorder(df, cruise_df, reorder_weeks, safety_pct, custom_kw, custom_it
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# QA AGENT
+# QA AGENT  — uses df_to_md() instead of .to_markdown()
 # ══════════════════════════════════════════════════════════════════════════════
 def agent_respond(user_msg, reorder_df, custom_kw, custom_items, context_df):
     msg = user_msg.lower().strip()
 
+    # ── Why is / Explain ─────────────────────────────────────────────────────
     for trigger in ["why is", "why was", "explain"]:
         if trigger in msg:
             token = msg.split(trigger)[-1].strip().rstrip("?").strip()
@@ -501,6 +338,7 @@ def agent_respond(user_msg, reorder_df, custom_kw, custom_items, context_df):
                 reply = f"I couldn't find an item matching **'{token}'**."
             return reply, custom_kw, custom_items
 
+    # ── Custom exclusion rule ─────────────────────────────────────────────────
     if any(x in msg for x in ["exclude", "block", "remove", "never suggest"]):
         kw_match = re.search(r"[\"'](.*?)[\"']", msg)
         if kw_match:
@@ -512,24 +350,27 @@ def agent_respond(user_msg, reorder_df, custom_kw, custom_items, context_df):
             reply = "Put the keyword in quotes. Example: `exclude 'sale poster'`"
         return reply, custom_kw, custom_items
 
+    # ── Urgent items ──────────────────────────────────────────────────────────
     if "urgent" in msg or "critical" in msg:
         urgent = reorder_df[reorder_df["Priority"] == "🚨 URGENT"]
         if urgent.empty:
             reply = "No URGENT items found with current settings."
         else:
             top   = urgent[["Item #","Description","Suggested Order"]].head(10)
-            reply = f"**🚨 URGENT items ({len(urgent)} total):**\n\n" + df_to_md(top)
+            reply = f"**🚨 URGENT items ({len(urgent)} total — top 10):**\n\n" + df_to_md(top)
         return reply, custom_kw, custom_items
 
+    # ── Warning items ─────────────────────────────────────────────────────────
     if "warning" in msg:
         warn = reorder_df[reorder_df["Priority"] == "⚠️ WARNING"]
         if warn.empty:
-            reply = "No WARNING items found."
+            reply = "No WARNING items found with current settings."
         else:
             top   = warn[["Item #","Description","Suggested Order"]].head(10)
-            reply = f"**⚠️ WARNING items ({len(warn)} total):**\n\n" + df_to_md(top)
+            reply = f"**⚠️ WARNING items ({len(warn)} total — top 10):**\n\n" + df_to_md(top)
         return reply, custom_kw, custom_items
 
+    # ── Top sellers ───────────────────────────────────────────────────────────
     if any(x in msg for x in ["top", "best seller", "best selling", "highest"]):
         if context_df is not None:
             top   = context_df.nlargest(10, "Number Sold")[["Item Number","Description","Number Sold","Margin"]]
@@ -538,21 +379,28 @@ def agent_respond(user_msg, reorder_df, custom_kw, custom_items, context_df):
             reply = "No sales data loaded yet."
         return reply, custom_kw, custom_items
 
+    # ── Cruise prep ───────────────────────────────────────────────────────────
     if "cruise" in msg:
         souvenir_kws = ["magnet","postcard","keychain","ornament","bookmark","lapel","sticker","soapstone"]
         if context_df is not None:
-            mask  = context_df["Description"].str.lower().apply(lambda d: any(kw in d for kw in souvenir_kws))
+            mask  = context_df["Description"].str.lower().apply(
+                lambda d: any(kw in d for kw in souvenir_kws))
             items = context_df[mask].nlargest(15, "Number Sold")[["Item Number","Description","Number Sold"]]
-            reply = "**Top items for cruise week:**\n\n" + df_to_md(items) if not items.empty else "No souvenir items found."
+            if items.empty:
+                reply = "No souvenir-type items found in your sales data."
+            else:
+                reply = "**Top items for cruise week:**\n\n" + df_to_md(items)
         else:
-            reply = "No sales data loaded."
+            reply = "No sales data loaded. Upload a Sales History file first."
         return reply, custom_kw, custom_items
 
+    # ── Exclusion rules ───────────────────────────────────────────────────────
     if "rule" in msg or "exclusion" in msg:
         all_rules = EXCLUDE_KEYWORDS + custom_kw
         reply = "**Current exclusion rules:**\n\n" + "\n".join(f"- `{r}`" for r in all_rules)
         return reply, custom_kw, custom_items
 
+    # ── Summary ───────────────────────────────────────────────────────────────
     if "summary" in msg or "overview" in msg:
         n_urgent = len(reorder_df[reorder_df["Priority"] == "🚨 URGENT"])
         n_warn   = len(reorder_df[reorder_df["Priority"] == "⚠️ WARNING"])
@@ -569,16 +417,17 @@ def agent_respond(user_msg, reorder_df, custom_kw, custom_items, context_df):
         )
         return reply, custom_kw, custom_items
 
+    # ── Default help ──────────────────────────────────────────────────────────
     reply = (
         "Hi! I'm your Reorder QA Agent. Try:\n\n"
         "- **Show urgent items**\n"
         "- **Show warning items**\n"
-        "- **Summary**\n"
+        "- **Summary** — overall reorder overview\n"
         "- **Why is [item] excluded?**\n"
         "- **Why is [item] in the list?**\n"
         "- **Top sellers**\n"
         "- **What to order for cruise week**\n"
-        "- **Exclude 'keyword'**\n"
+        "- **Exclude 'keyword'** — add a custom rule\n"
         "- **Show exclusion rules**\n"
     )
     return reply, custom_kw, custom_items
@@ -635,25 +484,18 @@ with st.sidebar:
     next_mo = (CURRENT_MONTH % 12) + 1
     st.caption(f"📅 Today: {date.today().strftime('%b %d, %Y')}")
     st.caption(f"🗓 Next month seasonal: **{SEASONAL_INDEX.get(next_mo, 1.0)}x**")
+
     if st.session_state.sales_weeks:
         wks_values = [float(v) for v in st.session_state.sales_weeks.values()]
         avg_w = sum(wks_values) / len(wks_values)
         st.caption(f"📊 Report covers: **{avg_w:.1f} weeks**")
+
     if st.session_state.cruise_df is not None:
-        st.caption(f"🚢 {len(st.session_state.cruise_df)} sailings | {int(st.session_state.cruise_df['Passengers'].sum()):,} pax")
+        n_ships = len(st.session_state.cruise_df)
+        total_p = int(st.session_state.cruise_df["Passengers"].sum())
+        st.caption(f"🚢 {n_ships} sailings | {total_p:,} pax")
     else:
         st.caption("🚢 Cruise: not loaded")
-
-    # Live connection indicator
-    st.markdown("---")
-    try:
-        has_creds = bool(st.secrets.get("JASPER_URL"))
-    except Exception:
-        has_creds = False
-    if has_creds:
-        st.caption("🔗 MMS POS: credentials configured")
-    else:
-        st.caption("🔗 MMS POS: [add secrets to connect](https://docs.streamlit.io/deploy/streamlit-community-cloud/deploy-your-app/secrets-management)")
 
 
 def get_active_df():
@@ -670,121 +512,15 @@ def get_active_df():
 if page == "📤 Data Hub":
     st.title("📤 Data Hub")
 
-    tab1, tab2, tab3, tab4, tab5 = st.tabs([
-        "🔗 Live Fetch (MMS POS)",
-        "📦 Upload CSV",
-        "🚢 Cruise Schedule",
-        "🌤 Weather",
-        "📋 Inventory",
+    tab1, tab2, tab3, tab4 = st.tabs([
+        "📦 Sales History", "🚢 Cruise Schedule", "🌤 Weather", "📋 Current Inventory"
     ])
 
-    # ── Tab 1: LIVE FETCH ─────────────────────────────────────────────────────
     with tab1:
-        st.subheader("🔗 Fetch Live Data from MMS POS")
-
-        # Credentials check
-        try:
-            has_creds = bool(st.secrets.get("JASPER_URL")) and bool(st.secrets.get("JASPER_PASSWORD"))
-        except Exception:
-            has_creds = False
-
-        if not has_creds:
-            st.warning("⚠️ MMS POS credentials not configured yet.")
-            st.markdown(
-                "Add these to **Streamlit Cloud → Settings → Secrets**:\n"
-                "```toml\n"
-                'JASPER_URL      = "https://gm-overture.mmspos.com/jasperserver-pro"\n'
-                'JASPER_ORG      = "2350"\n'
-                'JASPER_USER     = "BF"\n'
-                'JASPER_PASSWORD = "your_password"\n'
-                "```"
-            )
-
-        col_a, col_b = st.columns([3, 1])
-        with col_b:
-            if st.button("🔌 Test Connection"):
-                ctx = get_jasper_session()
-                with st.spinner("Connecting..."):
-                    ok, msg = jasper_login(ctx)
-                if ok:
-                    st.success(msg)
-                else:
-                    st.error(msg)
-
-        st.markdown("---")
-        st.markdown("### Fetch Sales History")
-
-        c1, c2, c3 = st.columns(3)
-        with c1:
-            report_type = st.selectbox(
-                "Report",
-                list(REPORT_PATHS.keys()),
-                index=0,
-            )
-        with c2:
-            fetch_from = st.date_input("From", value=date(2025, 3, 1))
-        with c3:
-            fetch_to   = st.date_input("To",   value=date(2025, 3, 31))
-
-        branch_input = st.text_input("Branch Number (blank = ALL branches)", value="")
-        branch_val   = branch_input.strip() if branch_input.strip() else "ALL"
-
-        if st.button("⬇️ Fetch Now", type="primary", disabled=not has_creds):
-            ctx = get_jasper_session()
-            with st.spinner(f"Fetching {report_type} from MMS POS..."):
-                df_live, msg = jasper_fetch(
-                    ctx,
-                    report_type,
-                    fetch_from.strftime("%Y-%m-%d"),
-                    fetch_to.strftime("%Y-%m-%d"),
-                    branch_val,
-                )
-
-            if df_live is not None and not df_live.empty:
-                st.success(msg)
-                st.dataframe(df_live.head(25), use_container_width=True)
-
-                # Store in session so Dashboard/Forecast pick it up
-                branch_key   = branch_val
-                actual_weeks = max((fetch_to - fetch_from).days, 1) / 7.0
-                df_live["Branch"]       = branch_key
-                df_live["Actual Weeks"] = round(actual_weeks, 1)
-                st.session_state.sales_dfs[branch_key]   = df_live
-                st.session_state.sales_weeks[branch_key] = float(actual_weeks)
-
-                st.success(
-                    f"✅ Loaded as Branch **{branch_key}** ({actual_weeks:.1f} weeks). "
-                    f"Go to **📊 Dashboard** or **🔮 Forecast & Reorder**."
-                )
-                csv_out = df_live.to_csv(index=False).encode("utf-8")
-                st.download_button(
-                    "💾 Save as CSV",
-                    csv_out,
-                    f"{report_type}_{fetch_from}_{fetch_to}.csv",
-                    "text/csv",
-                )
-            else:
-                st.error(msg)
-
-        st.markdown("---")
-        st.markdown("### Browse Available Reports on Server")
-        if st.button("📂 List Reports", disabled=not has_creds):
-            ctx = get_jasper_session()
-            with st.spinner("Scanning..."):
-                reports, msg = jasper_list_reports(ctx)
-            if reports:
-                st.success(msg)
-                for r in reports:
-                    st.code(r)
-            else:
-                st.warning(msg)
-
-    # ── Tab 2: UPLOAD CSV ─────────────────────────────────────────────────────
-    with tab2:
-        st.subheader("📦 Upload Sales History CSV")
+        st.subheader("Sales History CSV")
         st.info(
             "Accepts **SalesHistoryReport** and **SalesHistoryByItemReport** exports. "
-            "Upload multiple files at once. Branch and date range are auto-detected."
+            "Upload multiple files at once. Branch number and date range are auto-detected."
         )
         uploaded = st.file_uploader(
             "Upload Sales History CSV(s)", type=["csv"],
@@ -798,7 +534,7 @@ if page == "📤 Data Hub":
                     st.session_state.sales_weeks[branch] = float(actual_weeks)
                     st.success(
                         f"✅ Branch **{branch}** — {len(df):,} items | "
-                        f"{dfrom} → {dto} | **{actual_weeks:.1f} weeks**"
+                        f"{dfrom} → {dto} | **{actual_weeks:.1f} weeks of data**"
                     )
                 else:
                     st.error(f"❌ Could not parse **{f.name}**.")
@@ -818,19 +554,21 @@ if page == "📤 Data Hub":
                 st.session_state.sales_weeks = {}
                 st.rerun()
 
-    # ── Tab 3: CRUISE ─────────────────────────────────────────────────────────
-    with tab3:
+    with tab2:
         st.subheader("🚢 Cruise Schedule — St. John's 2026")
-        st.markdown("**Expected CSV format:**")
-        st.dataframe(pd.DataFrame({
+        st.markdown("**Expected CSV format** (3 columns):")
+        sample_fmt = pd.DataFrame({
             "Date":       ["2026-06-05","2026-07-14","2026-08-18"],
             "Ship Name":  ["Volendam","Crown Princess","Zuiderdam"],
             "Passengers": [1839, 3592, 2388]
-        }), use_container_width=True, hide_index=True)
+        })
+        st.dataframe(sample_fmt, use_container_width=True, hide_index=True)
         st.caption("• Date = YYYY-MM-DD  •  Passengers can be blank (defaults to 1,200)")
 
+        st.markdown("---")
         col1, col2 = st.columns(2)
         with col1:
+            st.markdown("**Upload your own CSV:**")
             cruise_file = st.file_uploader("Upload Cruise CSV", type=["csv"], key="cruise_upload")
             if cruise_file:
                 cdf, err = load_cruise_csv(cruise_file)
@@ -840,6 +578,7 @@ if page == "📤 Data Hub":
                     st.session_state.cruise_df = cdf
                     st.success(f"✅ {len(cdf)} sailings | {int(cdf['Passengers'].sum()):,} passengers")
         with col2:
+            st.markdown("**Or load the official 2026 schedule:**")
             st.caption("Source: City of St. John's Port Authority")
             st.caption("38 sailings · ~36,904 passengers · May–October 2026")
             if st.button("🚢 Load Official 2026 Schedule"):
@@ -856,31 +595,30 @@ if page == "📤 Data Hub":
             st.dataframe(cdf_show[["Date","Ship Name","Passengers"]], use_container_width=True, hide_index=True)
             monthly = (st.session_state.cruise_df
                        .groupby("Month")["Passengers"]
-                       .agg(Ships="count", Total_Passengers="sum").reset_index())
+                       .agg(Ships="count", Total_Passengers="sum")
+                       .reset_index())
             st.dataframe(monthly, use_container_width=True, hide_index=True)
             if st.button("🗑 Clear cruise data"):
                 st.session_state.cruise_df = None
                 st.rerun()
 
-    # ── Tab 4: Weather ────────────────────────────────────────────────────────
-    with tab4:
+    with tab3:
         st.subheader("🌤 Weather History")
         st.info("Upload a CSV with columns: `Date`, `Temperature`, `Precipitation_mm`, `Condition`")
         weather_file = st.file_uploader("Upload Weather CSV", type=["csv"], key="weather_upload")
         if weather_file:
             wdf = pd.read_csv(weather_file)
-            st.success(f"✅ {len(wdf)} records loaded")
+            st.success(f"✅ {len(wdf)} weather records loaded")
             st.dataframe(wdf.head(), use_container_width=True)
 
-    # ── Tab 5: Inventory ──────────────────────────────────────────────────────
-    with tab5:
+    with tab4:
         st.subheader("📋 Current Inventory")
         st.info("Upload a CSV with columns: `Item Number`, `Description`, `Qty On Hand`, `Branch`")
         inv_file = st.file_uploader("Upload Inventory CSV", type=["csv"], key="inv_upload")
         if inv_file:
             idf = pd.read_csv(inv_file)
             st.session_state.inventory_df = idf
-            st.success(f"✅ {len(idf)} items loaded")
+            st.success(f"✅ {len(idf)} inventory items loaded")
             st.dataframe(idf.head(10), use_container_width=True)
 
 
@@ -891,7 +629,7 @@ elif page == "📊 Dashboard":
     st.title("📊 Dashboard")
     df = get_active_df()
     if df is None:
-        st.warning("No data loaded. Use **📤 Data Hub** to fetch live data or upload a CSV.")
+        st.warning("No data loaded. Please upload Sales History files in 📤 Data Hub.")
         st.stop()
 
     label        = "All Branches" if selected_branch == "ALL" else f"Branch {selected_branch}"
@@ -914,11 +652,12 @@ elif page == "📊 Dashboard":
     with col_l:
         top_rev = df.nlargest(15, "Selling")[["Description","Selling","Profit","Number Sold"]]
         fig = px.bar(top_rev, x="Selling", y="Description", orientation="h",
-                     title="Top 15 Items by Revenue", color="Profit",
-                     color_continuous_scale="Teal",
+                     title="Top 15 Items by Revenue",
+                     color="Profit", color_continuous_scale="Teal",
                      labels={"Selling":"Revenue ($)","Description":""})
         fig.update_layout(height=500, yaxis=dict(autorange="reversed"))
         st.plotly_chart(fig, use_container_width=True)
+
     with col_r:
         df["Velocity"] = df.apply(lambda r: classify_velocity(r["Number Sold"], actual_weeks), axis=1)
         vel = df["Velocity"].value_counts().reset_index()
@@ -944,21 +683,27 @@ elif page == "🔮 Forecast & Reorder":
     st.title("🔮 Forecast & Reorder Suggestions")
     df = get_active_df()
     if df is None:
-        st.warning("No data loaded. Use **📤 Data Hub** to fetch live data or upload a CSV.")
+        st.warning("No data loaded. Please upload Sales History files in 📤 Data Hub.")
         st.stop()
 
     actual_weeks = safe_weeks(df)
     if actual_weeks < 50:
-        st.info(f"ℹ️ Report covers **{actual_weeks:.1f} weeks** — forecast divided by this period.")
+        st.info(
+            f"ℹ️ Your report covers **{actual_weeks:.1f} weeks** of sales data. "
+            f"The forecast divides by this period — not by 52 weeks."
+        )
 
     with st.expander("⚙️ Forecast Settings", expanded=True):
         col1, col2 = st.columns(2)
-        reorder_weeks = col1.slider("Weeks to stock for", 2, 12, 4)
+        reorder_weeks = col1.slider("How many weeks to stock for", 2, 12, 4)
         safety_pct    = col2.slider("Safety stock %", 0, 50, 15)
 
-    rdf = build_reorder(df, st.session_state.cruise_df, reorder_weeks, safety_pct,
-                        st.session_state.custom_exclude_keywords,
-                        st.session_state.custom_exclude_items)
+    rdf = build_reorder(
+        df, st.session_state.cruise_df,
+        reorder_weeks, safety_pct,
+        st.session_state.custom_exclude_keywords,
+        st.session_state.custom_exclude_items
+    )
     st.session_state.reorder_df = rdf
 
     st.markdown("---")
@@ -969,7 +714,7 @@ elif page == "🔮 Forecast & Reorder":
         ["🚨 URGENT","⚠️ WARNING","✅ OK","❌ EXCLUDED"],
         default=["🚨 URGENT","⚠️ WARNING","✅ OK"]
     )
-    search_term = col_c.text_input("🔍 Search")
+    search_term = col_c.text_input("🔍 Search description")
 
     display_df = rdf.copy()
     if not show_excluded:
@@ -977,7 +722,9 @@ elif page == "🔮 Forecast & Reorder":
     if priority_filter:
         display_df = display_df[display_df["Priority"].isin(priority_filter)]
     if search_term:
-        display_df = display_df[display_df["Description"].str.lower().str.contains(search_term.lower(), na=False)]
+        display_df = display_df[
+            display_df["Description"].str.lower().str.contains(search_term.lower(), na=False)
+        ]
 
     c1, c2, c3, c4 = st.columns(4)
     c1.metric("🚨 URGENT",  len(rdf[rdf["Priority"] == "🚨 URGENT"]))
@@ -986,30 +733,37 @@ elif page == "🔮 Forecast & Reorder":
     c4.metric("❌ Excluded", len(rdf[rdf["Priority"] == "❌ EXCLUDED"]))
 
     st.markdown(f"**Showing {len(display_df):,} items**")
-    st.dataframe(display_df[[
-        "Priority","Item #","Description","Brand","Velocity",
-        "Total Sold","Report Weeks","Avg/Week","Seasonal Idx","Cruise Mult",
-        "Forecast Qty","Suggested Order","Margin %","Exclusion Reason","Branch"
-    ]], use_container_width=True, height=500)
+    st.dataframe(
+        display_df[[
+            "Priority","Item #","Description","Brand","Velocity",
+            "Total Sold","Report Weeks","Avg/Week","Seasonal Idx","Cruise Mult",
+            "Forecast Qty","Suggested Order","Margin %","Exclusion Reason","Branch"
+        ]],
+        use_container_width=True, height=500
+    )
 
     csv_out = display_df.to_csv(index=False).encode("utf-8")
-    st.download_button("⬇️ Download Reorder List", csv_out, "reorder_suggestions.csv", "text/csv")
+    st.download_button("⬇️ Download Reorder List (CSV)", csv_out,
+                       "reorder_suggestions.csv", "text/csv")
 
     if show_excluded:
         st.markdown("---")
-        excl_df = rdf[rdf["Priority"] == "❌ EXCLUDED"][["Item #","Description","Total Sold","Margin %","Exclusion Reason"]]
+        st.subheader("❌ Excluded Items Detail")
+        excl_df = rdf[rdf["Priority"] == "❌ EXCLUDED"][[
+            "Item #","Description","Total Sold","Margin %","Exclusion Reason"
+        ]]
         st.dataframe(excl_df, use_container_width=True)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# PAGE: QA AGENT
+# PAGE: QA AGENT CHAT
 # ══════════════════════════════════════════════════════════════════════════════
 elif page == "🤖 QA Agent Chat":
     st.title("🤖 Reorder QA Agent")
     st.caption("Ask me about reorder items, exclusions, top sellers, or cruise prep.")
 
     if st.session_state.reorder_df is None:
-        st.warning("Go to **🔮 Forecast & Reorder** first, then come back here.")
+        st.warning("Go to **🔮 Forecast & Reorder** first to generate the list, then come back here.")
         st.stop()
 
     for msg in st.session_state.chat_history:
@@ -1021,12 +775,15 @@ elif page == "🤖 QA Agent Chat":
         st.session_state.chat_history.append({"role":"user","content":user_input})
         with st.chat_message("user"):
             st.markdown(user_input)
+
         reply, st.session_state.custom_exclude_keywords, st.session_state.custom_exclude_items = agent_respond(
-            user_input, st.session_state.reorder_df,
+            user_input,
+            st.session_state.reorder_df,
             st.session_state.custom_exclude_keywords,
             st.session_state.custom_exclude_items,
             get_active_df()
         )
+
         st.session_state.chat_history.append({"role":"assistant","content":reply})
         with st.chat_message("assistant"):
             st.markdown(reply)
@@ -1050,12 +807,12 @@ elif page == "📈 Analytics":
     tab1, tab2, tab3 = st.tabs(["🏆 Top Performers", "🔮 Seasonal Forecast", "🏪 Brand Analysis"])
 
     with tab1:
-        n      = st.slider("Top N items", 10, 50, 20)
+        n      = st.slider("Show top N items", 10, 50, 20)
         metric = st.selectbox("Rank by", ["Selling","Number Sold","Profit","Margin"])
         top_df = df[df["Number Sold"] > 0].nlargest(n, metric)
         fig    = px.bar(top_df, x=metric, y="Description", orientation="h",
-                        title=f"Top {n} Items by {metric}", color="Margin",
-                        color_continuous_scale="Viridis")
+                        title=f"Top {n} Items by {metric}",
+                        color="Margin", color_continuous_scale="Viridis")
         fig.update_layout(height=600, yaxis=dict(autorange="reversed"))
         st.plotly_chart(fig, use_container_width=True)
 
@@ -1066,14 +823,15 @@ elif page == "📈 Analytics":
         for i in range(1, 13):
             mo  = (CURRENT_MONTH + i - 1) % 12 + 1
             yr  = CURRENT_YEAR + ((CURRENT_MONTH + i - 1) // 12)
+            idx = SEASONAL_INDEX[mo]
             months.append({
                 "Month":          f"{yr}-{mo:02d}",
-                "Seasonal Index": SEASONAL_INDEX[mo],
-                "Forecast Units": round(base_weekly * 4.33 * SEASONAL_INDEX[mo])
+                "Seasonal Index": idx,
+                "Forecast Units": round(base_weekly * 4.33 * idx)
             })
         sdf   = pd.DataFrame(months)
-        fig_s = px.bar(sdf, x="Month", y="Forecast Units", color="Seasonal Index",
-                       color_continuous_scale="RdYlGn",
+        fig_s = px.bar(sdf, x="Month", y="Forecast Units",
+                       color="Seasonal Index", color_continuous_scale="RdYlGn",
                        title="12-Month Demand Forecast (NL Tourism Seasonal Model)")
         fig_s.add_scatter(x=sdf["Month"], y=sdf["Forecast Units"],
                           mode="lines+markers", name="Trend",
@@ -1081,20 +839,23 @@ elif page == "📈 Analytics":
         st.plotly_chart(fig_s, use_container_width=True)
 
         if st.session_state.cruise_df is not None:
+            st.subheader("🚢 Cruise Passenger Calendar")
             cdf     = st.session_state.cruise_df.copy()
             monthly = cdf.groupby("Month")["Passengers"].sum().reset_index()
             fig_c   = px.bar(monthly, x="Month", y="Passengers",
-                             title="2026 Cruise Passenger Volume — St. John's",
+                             title="2026 Monthly Cruise Passenger Volume — St. John's",
                              color="Passengers", color_continuous_scale="Blues")
             st.plotly_chart(fig_c, use_container_width=True)
 
     with tab3:
-        brand_df = (df.groupby("Brand")
-                    .agg({"Number Sold":"sum","Selling":"sum","Profit":"sum"})
-                    .reset_index().nlargest(20, "Selling"))
+        brand_df = (
+            df.groupby("Brand")
+              .agg({"Number Sold":"sum","Selling":"sum","Profit":"sum"})
+              .reset_index().nlargest(20, "Selling")
+        )
         fig_b = px.bar(brand_df, x="Selling", y="Brand", orientation="h",
-                       title="Top 20 Brands by Revenue", color="Profit",
-                       color_continuous_scale="Teal")
+                       title="Top 20 Brands by Revenue",
+                       color="Profit", color_continuous_scale="Teal")
         fig_b.update_layout(height=600, yaxis=dict(autorange="reversed"))
         st.plotly_chart(fig_b, use_container_width=True)
 
@@ -1105,19 +866,19 @@ elif page == "📈 Analytics":
 elif page == "⚙️ Settings":
     st.title("⚙️ Exclusion Rules & Settings")
 
-    st.subheader("🔒 Built-in Rules")
+    st.subheader("🔒 Built-in Rules (always active)")
     for kw in EXCLUDE_KEYWORDS:
         st.markdown(f"- `{kw}`")
 
     st.markdown("---")
     st.subheader("📅 Dated Item Rule")
     st.success(
-        f"Items matching {DATED_KEYWORDS} with year < {CURRENT_YEAR} are auto-excluded. "
+        f"Items matching {DATED_KEYWORDS} with a year < {CURRENT_YEAR} are auto-excluded. "
         f"Year {CURRENT_YEAR} calendars excluded after March."
     )
 
     st.markdown("---")
-    st.subheader("➕ Custom Keywords")
+    st.subheader("➕ Custom Exclusion Keywords")
     new_kw = st.text_input("Add keyword to exclude")
     if st.button("➕ Add Rule") and new_kw:
         if new_kw.lower() not in st.session_state.custom_exclude_keywords:
@@ -1132,11 +893,11 @@ elif page == "⚙️ Settings":
                 st.session_state.custom_exclude_keywords.pop(i)
                 st.rerun()
     else:
-        st.info("No custom rules yet.")
+        st.info("No custom rules added yet.")
 
     st.markdown("---")
-    st.subheader("🔢 Exclude Item Numbers")
-    new_item = st.text_input("Item Number to exclude")
+    st.subheader("🔢 Exclude Specific Item Numbers")
+    new_item = st.text_input("Add Item Number to exclude (e.g. 107114)")
     if st.button("➕ Add Item") and new_item:
         if new_item not in st.session_state.custom_exclude_items:
             st.session_state.custom_exclude_items.append(new_item)
