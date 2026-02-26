@@ -2,12 +2,11 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 import plotly.express as px
-import plotly.graph_objects as go
 import re
 import io
+import csv as _csv
 from datetime import datetime, date
 
-# ── Page config ───────────────────────────────────────────────────────────────
 st.set_page_config(
     page_title="Heritage Shops — Inventory & Forecast",
     page_icon="🏪",
@@ -18,13 +17,11 @@ st.set_page_config(
 CURRENT_YEAR  = datetime.now().year
 CURRENT_MONTH = datetime.now().month
 
-# ── Seasonal index for NL tourism ─────────────────────────────────────────────
 SEASONAL_INDEX = {
     1:0.35, 2:0.35, 3:0.40, 4:0.55, 5:0.75, 6:1.20,
     7:2.50, 8:2.40, 9:1.50, 10:0.90, 11:0.55, 12:0.80
 }
 
-# ── Hard exclusion keyword lists ──────────────────────────────────────────────
 EXCLUDE_KEYWORDS = [
     "shipping charges", "environmental charge", "gift card",
     "gift certificate", "poster tube", "st-receive",
@@ -34,7 +31,7 @@ DATED_KEYWORDS = ["calendar", "planner", "diary", "agenda", "almanac"]
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# CSV PARSER
+# CSV PARSER  — handles real comma-separated POS export
 # ══════════════════════════════════════════════════════════════════════════════
 def parse_csv(uploaded_file):
     content = uploaded_file.read().decode("utf-8", errors="replace")
@@ -43,56 +40,68 @@ def parse_csv(uploaded_file):
     branch    = "Unknown"
     date_from = ""
     date_to   = ""
+
     for line in lines[:15]:
-        if "Branch" in line:
-            m = re.search(r"Branch\s+(\d+)", line)
+        if line.startswith("Branch:"):
+            m = re.search(r"Branch:\s*(\d+)", line)
             if m:
                 branch = m.group(1)
-        if "Date Range From" in line:
-            m = re.search(r"From\s+(\S+)\s+To\s+(\S+)", line)
+        if "Date Range" in line:
+            m = re.search(r"From[:\s]+(\S+)\s+To[:\s]+(\S+)", line)
             if m:
-                date_from, date_to = m.group(1), m.group(2)
-
-    header_idx = None
-    for i, line in enumerate(lines):
-        if "Item Number" in line and "Description" in line:
-            header_idx = i
-            break
-    if header_idx is None:
-        return None, branch, date_from, date_to
+                date_from = m.group(1)
+                date_to   = m.group(2).split(",")[0]
 
     data_rows = []
-    for line in lines[header_idx + 1:]:
-        line = line.strip()
-        if not line or line.startswith("-") or "Item Number" in line:
+    in_data   = False
+
+    for line in lines:
+        stripped = line.strip()
+
+        if stripped.startswith("Item Number"):
+            in_data = True
             continue
-        m = re.match(
-            r"^(\d{4,7})"
-            r"(\d{3})"
-            r"(\S+?)"
-            r"(\S+?)"
-            r"(.+?)\s+"
-            r"(\d+)\s+"
-            r"([\d,]+\.\d{2})\s+"
-            r"([\d,]+\.\d{2})\s+"
-            r"(-?[\d,]+\.\d{2})\s+"
-            r"(-?[\d,.]+)$",
-            line
-        )
-        if m:
-            g = m.groups()
+
+        if stripped.startswith("Supplier,Product") or stripped.startswith("Supplier Product"):
+            in_data = False
+            continue
+
+        if not in_data or not stripped:
+            continue
+
+        if stripped.startswith(","):
+            continue
+
+        reader = _csv.reader(io.StringIO(stripped))
+        try:
+            row = next(reader)
+        except StopIteration:
+            continue
+
+        while len(row) < 12:
+            row.append("")
+
+        item_num = row[0].strip()
+        if not item_num or not re.match(r"^\d+$", item_num):
+            continue
+
+        try:
             data_rows.append({
-                "Item Number": g[0],
-                "Department":  g[1],
-                "Brand":       g[2],
-                "Supplier":    g[3],
-                "Description": g[4].strip(),
-                "Number Sold": int(g[5].replace(",", "")),
-                "Selling":     float(g[6].replace(",", "")),
-                "Cost":        float(g[7].replace(",", "")),
-                "Profit":      float(g[8].replace(",", "")),
-                "Margin":      float(g[9].replace(",", "").replace("%", "")),
+                "Item Number":  item_num,
+                "Department":   row[1].strip(),
+                "Brand":        row[2].strip(),
+                "Supplier":     row[3].strip(),
+                "Desc Code":    row[4].strip(),
+                "Description":  row[5].strip(),
+                "Supp Cat":     row[6].strip(),
+                "Number Sold":  int(float(row[7])) if row[7].strip() else 0,
+                "Selling":      float(row[8])       if row[8].strip() else 0.0,
+                "Cost":         float(row[9])       if row[9].strip() else 0.0,
+                "Profit":       float(row[10])      if row[10].strip() else 0.0,
+                "Margin":       float(row[11])      if row[11].strip() else 0.0,
             })
+        except (ValueError, IndexError):
+            continue
 
     if not data_rows:
         return None, branch, date_from, date_to
@@ -112,8 +121,7 @@ def classify_velocity(sold):
     return "💀 Dead"
 
 
-def get_exclusion_reason(desc, item_num, margin, sold,
-                         custom_kw, custom_items):
+def get_exclusion_reason(desc, item_num, margin, sold, custom_kw, custom_items):
     desc_lower = desc.lower()
 
     if str(item_num) in custom_items:
@@ -142,8 +150,7 @@ def get_exclusion_reason(desc, item_num, margin, sold,
     return None
 
 
-def build_reorder(df, cruise_df, reorder_weeks, safety_pct,
-                  custom_kw, custom_items):
+def build_reorder(df, cruise_df, reorder_weeks, safety_pct, custom_kw, custom_items):
     next_month = (CURRENT_MONTH % 12) + 1
     seasonal   = SEASONAL_INDEX.get(next_month, 1.0)
 
@@ -204,7 +211,6 @@ def agent_respond(user_msg, reorder_df, custom_kw, custom_items, context_df):
     msg   = user_msg.lower().strip()
     reply = ""
 
-    # Why is X excluded / in the list
     for trigger in ["why is", "why was", "explain"]:
         if trigger in msg:
             token = msg.split(trigger)[-1].strip().rstrip("?").strip()
@@ -213,8 +219,8 @@ def agent_respond(user_msg, reorder_df, custom_kw, custom_items, context_df):
                 reorder_df["Item #"].astype(str).str.contains(token, na=False)
             ]
             if not matches.empty:
-                row   = matches.iloc[0]
-                excl  = row["Exclusion Reason"]
+                row  = matches.iloc[0]
+                excl = row["Exclusion Reason"]
                 if excl:
                     reply = (
                         f"**{row['Description']}** (Item #{row['Item #']}) is **excluded**.\n\n"
@@ -234,7 +240,6 @@ def agent_respond(user_msg, reorder_df, custom_kw, custom_items, context_df):
                 reply = f"I couldn't find an item matching **'{token}'** in the current reorder list."
             return reply, custom_kw, custom_items
 
-    # Add exclusion rule
     if any(x in msg for x in ["exclude", "block", "remove", "never suggest"]):
         kw_match = re.search(r"[\"'](.*?)[\"']", msg)
         if kw_match:
@@ -242,60 +247,48 @@ def agent_respond(user_msg, reorder_df, custom_kw, custom_items, context_df):
             if new_kw not in custom_kw:
                 custom_kw.append(new_kw)
             reply = (
-                f"✅ Rule added: items containing **'{new_kw}'** will now be excluded.\n\n"
-                f"Go to **🔮 Forecast & Reorder** and refresh to see the updated list."
+                f"Rule added: items containing **'{new_kw}'** will now be excluded.\n\n"
+                f"Go to **Forecast & Reorder** and refresh to see the updated list."
             )
         else:
-            reply = (
-                "To add an exclusion rule, put the keyword in quotes.\n\n"
-                "Example: `exclude 'sale poster'`"
-            )
+            reply = "Put the keyword in quotes. Example: `exclude 'sale poster'`"
         return reply, custom_kw, custom_items
 
-    # Show URGENT items
     if "urgent" in msg or "critical" in msg:
         urgent = reorder_df[reorder_df["Priority"] == "🚨 URGENT"]
         if urgent.empty:
             reply = "No URGENT items found with current settings."
         else:
-            top = urgent[["Item #", "Description", "Suggested Order"]].head(10)
-            reply = f"**🚨 URGENT items ({len(urgent)} total — top 10):**\n\n" + top.to_markdown(index=False)
+            top   = urgent[["Item #", "Description", "Suggested Order"]].head(10)
+            reply = f"**URGENT items ({len(urgent)} total — top 10):**\n\n" + top.to_markdown(index=False)
         return reply, custom_kw, custom_items
 
-    # Top sellers
     if any(x in msg for x in ["top", "best seller", "best selling", "highest"]):
         if context_df is not None:
-            top = context_df.nlargest(10, "Number Sold")[
-                ["Item Number", "Description", "Number Sold", "Margin"]]
-            reply = "**🏆 Top 10 Best Sellers (by units sold):**\n\n" + top.to_markdown(index=False)
+            top   = context_df.nlargest(10, "Number Sold")[["Item Number","Description","Number Sold","Margin"]]
+            reply = "**Top 10 Best Sellers (by units sold):**\n\n" + top.to_markdown(index=False)
         else:
             reply = "No sales data loaded yet."
         return reply, custom_kw, custom_items
 
-    # Cruise week suggestions
     if "cruise" in msg:
-        souvenir_kws = ["magnet", "postcard", "keychain", "ornament",
-                        "bookmark", "lapel", "sticker", "soapstone"]
+        souvenir_kws = ["magnet","postcard","keychain","ornament","bookmark",
+                        "lapel","sticker","soapstone"]
         if context_df is not None:
-            mask = context_df["Description"].str.lower().apply(
+            mask  = context_df["Description"].str.lower().apply(
                 lambda d: any(kw in d for kw in souvenir_kws))
             items = context_df[mask].nlargest(15, "Number Sold")[
-                ["Item Number", "Description", "Number Sold"]]
-            reply = (
-                "**🚢 Top items for cruise week** (high-turnover souvenirs):\n\n"
-                + items.to_markdown(index=False)
-            )
+                ["Item Number","Description","Number Sold"]]
+            reply = "**Top items for cruise week (souvenirs):**\n\n" + items.to_markdown(index=False)
         else:
             reply = "No sales data loaded. Upload a Sales History file first."
         return reply, custom_kw, custom_items
 
-    # Show exclusion rules
     if "rule" in msg or "exclusion" in msg:
         all_rules = EXCLUDE_KEYWORDS + custom_kw
         reply = "**Current exclusion rules:**\n\n" + "\n".join(f"- `{r}`" for r in all_rules)
         return reply, custom_kw, custom_items
 
-    # Default help
     reply = (
         "Hi! I'm your Reorder QA Agent. Try asking:\n\n"
         "- **Why is [item name] excluded?**\n"
@@ -310,7 +303,7 @@ def agent_respond(user_msg, reorder_df, custom_kw, custom_items, context_df):
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# SESSION STATE INIT
+# SESSION STATE
 # ══════════════════════════════════════════════════════════════════════════════
 defaults = {
     "sales_dfs":               {},
@@ -365,7 +358,6 @@ with st.sidebar:
         st.caption("🚢 Cruise data: not loaded")
 
 
-# ── Helper: get active dataframe ──────────────────────────────────────────────
 def get_active_df():
     if not st.session_state.sales_dfs:
         return None
@@ -379,7 +371,7 @@ def get_active_df():
 # ══════════════════════════════════════════════════════════════════════════════
 if page == "📤 Data Hub":
     st.title("📤 Data Hub")
-    st.markdown("Upload your data files here. **Sales History** is required; all others are optional.")
+    st.markdown("Upload your data files. **Sales History** is required; all others are optional.")
 
     tab1, tab2, tab3, tab4 = st.tabs([
         "📦 Sales History", "🚢 Cruise Schedule", "🌤 Weather", "📋 Current Inventory"
@@ -387,7 +379,10 @@ if page == "📤 Data Hub":
 
     with tab1:
         st.subheader("Sales History CSV")
-        st.info("Upload one or more Sales History exports. Branch numbers are auto-detected from the file header.")
+        st.info(
+            "Accepts both **SalesHistoryReport** and **SalesHistoryByItemReport** exports. "
+            "You can upload multiple files (one per branch) at once."
+        )
         uploaded = st.file_uploader(
             "Upload Sales History CSV(s)", type=["csv"],
             accept_multiple_files=True, key="sales_upload"
@@ -397,18 +392,27 @@ if page == "📤 Data Hub":
                 df, branch, dfrom, dto = parse_csv(f)
                 if df is not None and not df.empty:
                     st.session_state.sales_dfs[branch] = df
-                    st.success(f"✅ Branch {branch} — {len(df):,} items | {dfrom} → {dto}")
+                    st.success(
+                        f"✅ Branch **{branch}** — {len(df):,} items | "
+                        f"{dfrom} → {dto}"
+                    )
                 else:
-                    st.warning(f"⚠️ Could not parse {f.name}. Check the format.")
+                    st.error(
+                        f"❌ Could not parse **{f.name}**. "
+                        f"Make sure it is a Heritage POS CSV export (SalesHistoryReport or SalesHistoryByItemReport)."
+                    )
 
         if st.session_state.sales_dfs:
-            st.markdown("**Loaded branches:**")
+            st.markdown("### Loaded branches")
             for b, d in st.session_state.sales_dfs.items():
                 st.markdown(
                     f"- Branch **{b}**: {len(d):,} items | "
                     f"{d['Number Sold'].sum():,} units sold | "
                     f"${d['Selling'].sum():,.0f} revenue"
                 )
+            if st.button("🗑 Clear all loaded data"):
+                st.session_state.sales_dfs = {}
+                st.rerun()
 
     with tab2:
         st.subheader("🚢 Cruise Ship Schedule")
@@ -419,7 +423,6 @@ if page == "📤 Data Hub":
             "Passengers":[4200, 3800, 5100, 4700, 3200]
         })
         st.dataframe(sample_cruise, use_container_width=True)
-
         col1, col2 = st.columns(2)
         with col1:
             cruise_file = st.file_uploader("Upload Cruise CSV", type=["csv"], key="cruise_upload")
@@ -470,12 +473,12 @@ elif page == "📊 Dashboard":
     st.subheader(f"📍 {label} — Overview")
 
     c1, c2, c3, c4, c5 = st.columns(5)
-    c1.metric("Total Items",     f"{len(df):,}")
-    c2.metric("Units Sold",      f"{df['Number Sold'].sum():,}")
-    c3.metric("Total Revenue",   f"${df['Selling'].sum():,.0f}")
-    c4.metric("Total Profit",    f"${df['Profit'].sum():,.0f}")
-    pos_margin = df[df["Margin"] > 0]["Margin"].mean()
-    c5.metric("Avg Margin",      f"{pos_margin:.1f}%")
+    c1.metric("Total Items",   f"{len(df):,}")
+    c2.metric("Units Sold",    f"{df['Number Sold'].sum():,}")
+    c3.metric("Total Revenue", f"${df['Selling'].sum():,.0f}")
+    c4.metric("Total Profit",  f"${df['Profit'].sum():,.0f}")
+    pos = df[df["Margin"] > 0]["Margin"].mean()
+    c5.metric("Avg Margin",    f"{pos:.1f}%")
 
     st.markdown("---")
     col_l, col_r = st.columns(2)
@@ -645,15 +648,15 @@ elif page == "📈 Analytics":
         base_weekly = df["Number Sold"].sum() / 52
         months = []
         for i in range(1, 13):
-            mo = (CURRENT_MONTH + i - 1) % 12 + 1
-            yr = CURRENT_YEAR + ((CURRENT_MONTH + i - 1) // 12)
+            mo  = (CURRENT_MONTH + i - 1) % 12 + 1
+            yr  = CURRENT_YEAR + ((CURRENT_MONTH + i - 1) // 12)
             idx = SEASONAL_INDEX[mo]
             months.append({
                 "Month":          f"{yr}-{mo:02d}",
                 "Seasonal Index": idx,
                 "Forecast Units": round(base_weekly * 4.33 * idx)
             })
-        sdf = pd.DataFrame(months)
+        sdf   = pd.DataFrame(months)
         fig_s = px.bar(sdf, x="Month", y="Forecast Units",
                        color="Seasonal Index", color_continuous_scale="RdYlGn",
                        title="12-Month Demand Forecast (NL Tourism Seasonal Model)")
